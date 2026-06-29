@@ -29,7 +29,11 @@ export function truncateMiddle(text: string, maxBytes: number): string {
   // Snap tail start forward to a UTF-8 boundary, preferring the start of a line.
   while (tailStart < buf.length && (buf[tailStart] & 0xc0) === 0x80) tailStart++;
   const firstNl = buf.indexOf(0x0a, tailStart);
-  if (firstNl !== -1 && firstNl < buf.length - 1) tailStart = firstNl + 1;
+  // Only snap to the next line when the newline is within the first half of the
+  // tail region, so the snap is a small alignment step, not a large jump that
+  // would collapse the tail to a tiny slice.
+  const tailRegion = buf.length - tailStart;
+  if (firstNl !== -1 && firstNl < buf.length - 1 && (firstNl - tailStart) * 2 < tailRegion) tailStart = firstNl + 1;
 
   if (tailStart <= headEnd) return text; // budgets overlap; nothing to omit
 

@@ -32,4 +32,37 @@ describe('truncateMiddle', () => {
     expect(out).not.toContain('�');
     expect(out).toContain('omitidos');
   });
+
+  it('tail line-snap does not collapse tail when newline is near end of buffer', () => {
+    // Build input where the only newline in the tail region is very close to end.
+    // 2000 'a' chars then '\n' then 5 'b' chars — the newline at index 2000 is near
+    // the very end, so old code would snap tailStart past it leaving only "bbbbb".
+    const body = 'a'.repeat(2000) + '\n' + 'b'.repeat(5);
+    const maxBytes = 100;
+    const out = truncateMiddle(body, maxBytes);
+    // The tail should carry a meaningful chunk — more than just the 5 'b's.
+    const parts = out.split('[…');
+    const tail = parts[parts.length - 1].replace(/^[^\]]*\]\n/, '');
+    expect(Buffer.byteLength(tail, 'utf8')).toBeGreaterThan(10);
+  });
+
+  it('byte length of truncated 1000-line output is bounded by budget plus marker', () => {
+    const lines = Array.from({ length: 1000 }, (_, i) => `line${i}`).join('\n');
+    const maxBytes = 200;
+    const out = truncateMiddle(lines, maxBytes);
+    expect(Buffer.byteLength(out, 'utf8')).toBeLessThanOrEqual(maxBytes + 120);
+  });
+
+  it('formatBytes edge cases: 0 and exact 1024', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(1024)).toBe('1.0 KB');
+  });
+
+  it('long single-line (no newlines) is truncated by byte boundary, stays valid UTF-8, contains marker', () => {
+    const s = 'x'.repeat(5000);
+    const out = truncateMiddle(s, 200);
+    expect(out).toContain('omitidos');
+    expect(out).not.toContain('�');
+    expect(Buffer.byteLength(out, 'utf8')).toBeLessThanOrEqual(200 + 120);
+  });
 });
