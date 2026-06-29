@@ -37,7 +37,7 @@ describe('SSHConnectionManager', () => {
 
   describe('Integration Tests (with live SSH server)', () => {
     let manager: SSHConnectionManager;
-    const sshConfig = { host, port, username, password };
+    const sshConfig = { host, port, username, password, insecureHostKey: true };
 
     beforeEach(() => {
       manager = new SSHConnectionManager(sshConfig);
@@ -142,11 +142,12 @@ describe('SSHConnectionManager', () => {
 
     it('should handle command with stderr', async () => {
       await manager.connect();
-      
-      // This command writes to stderr
-      await expect(
-        execSshCommandWithConnection(manager, 'echo "error" >&2 && exit 1')
-      ).rejects.toThrow();
+
+      // exit 1 with stderr is now a normal result flagged as isError, not a throw.
+      const result: any = await execSshCommandWithConnection(manager, 'echo "error" >&2 && exit 1');
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('[exit 1]');
+      expect(result.content[0].text.toLowerCase()).toContain('error');
     }, 30000);
 
     it('should close connection properly', async () => {
@@ -280,8 +281,8 @@ describe('SSHConnectionManager', () => {
 
   describe('Connection Lifecycle', () => {
     it('should handle multiple connection managers independently', async () => {
-      const manager1 = new SSHConnectionManager({ host, port, username, password });
-      const manager2 = new SSHConnectionManager({ host, port, username, password });
+      const manager1 = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
+      const manager2 = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
       
       try {
         await manager1.connect();
@@ -302,7 +303,7 @@ describe('SSHConnectionManager', () => {
     }, 60000);
 
     it('should properly clean up after close', async () => {
-      const manager = new SSHConnectionManager({ host, port, username, password });
+      const manager = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
       
       await manager.connect();
       expect(manager.isConnected()).toBe(true);
@@ -348,19 +349,18 @@ describe('SSHConnectionManager', () => {
     }, 40000);
 
     it('should handle command execution errors gracefully', async () => {
-      const manager = new SSHConnectionManager({ host, port, username, password });
-      
+      const manager = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
+
       try {
         await manager.connect();
-        
-        // Execute invalid command
-        await expect(
-          execSshCommandWithConnection(manager, 'this-command-does-not-exist-12345')
-        ).rejects.toThrow();
-        
+
+        // An unknown command exits 127 — now a resolved result with isError, not a throw.
+        const errResult: any = await execSshCommandWithConnection(manager, 'this-command-does-not-exist-12345');
+        expect(errResult.isError).toBe(true);
+
         // Connection should still be alive for next command
         expect(manager.isConnected()).toBe(true);
-        
+
         // Should be able to execute valid command after error
         const result = await execSshCommandWithConnection(manager, 'echo "recovery"');
         expect((result.content[0] as any).text).toContain('recovery');
