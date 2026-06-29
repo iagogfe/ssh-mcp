@@ -9,7 +9,7 @@ import { createHash, createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { formatCommandResult, CommandResult, parseMaxBytes } from './output.js';
+import { formatCommandResult, parseMaxBytes } from './output.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {

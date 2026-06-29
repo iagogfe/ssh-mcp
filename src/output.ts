@@ -67,10 +67,18 @@ export function formatCommandResult(
     return { content: [{ type: 'text', text: outText }] };
   }
 
+  const abnormalExit = exitCode === null && !killedBySignal;
+
   const lines: string[] = [];
   if (outText.length > 0) lines.push(outText);
   lines.push('---');
-  lines.push(killedBySignal ? `[killed by SIG${signal}]` : `[exit ${exitCode}]`);
+  if (killedBySignal) {
+    lines.push(`[killed by SIG${signal}]`);
+  } else if (abnormalExit) {
+    lines.push('[no exit code]');
+  } else {
+    lines.push(`[exit ${exitCode}]`);
+  }
   if (hasStderr) {
     lines.push('stderr:');
     lines.push(truncateMiddle(stderr, maxBytes));
@@ -79,7 +87,7 @@ export function formatCommandResult(
   const out: { content: { type: 'text'; text: string }[]; isError?: boolean } = {
     content: [{ type: 'text', text: lines.join('\n') }],
   };
-  if ((exitCode !== 0 && exitCode !== null && exitCode !== undefined) || killedBySignal) {
+  if ((exitCode !== 0 && exitCode !== null && exitCode !== undefined) || killedBySignal || abnormalExit) {
     out.isError = true;
   }
   return out;

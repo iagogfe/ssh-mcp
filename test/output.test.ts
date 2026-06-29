@@ -99,6 +99,19 @@ describe('formatCommandResult', () => {
     expect(r.isError).toBe(true);
     expect(r.content[0].text).toContain('[killed by SIGTERM]');
   });
+
+  it('null exitCode without signal reports [no exit code] and isError', () => {
+    const r = formatCommandResult({ stdout: 'partial', stderr: '', exitCode: null }, big);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('[no exit code]');
+    expect(r.content[0].text).not.toContain('[exit null]');
+  });
+
+  it('truncation is wired inside formatCommandResult (tiny maxBytes)', () => {
+    const longStdout = 'line\n'.repeat(5000); // ~25 KB
+    const r = formatCommandResult({ stdout: longStdout, stderr: '', exitCode: 0 }, 10);
+    expect(r.content[0].text).toContain('linhas omitidos');
+  });
 });
 
 import { parseMaxBytes } from '../src/output';
