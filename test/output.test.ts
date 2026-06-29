@@ -66,3 +66,37 @@ describe('truncateMiddle', () => {
     expect(Buffer.byteLength(out, 'utf8')).toBeLessThanOrEqual(200 + 120);
   });
 });
+
+import { formatCommandResult } from '../src/output';
+
+describe('formatCommandResult', () => {
+  const big = 8192;
+
+  it('silent success returns stdout only, no isError', () => {
+    const r = formatCommandResult({ stdout: 'ok\n', stderr: '', exitCode: 0 }, big);
+    expect(r.content[0].text).toBe('ok\n');
+    expect(r.isError).toBeUndefined();
+  });
+
+  it('non-zero exit appends an [exit N] footer and marks isError', () => {
+    const r = formatCommandResult({ stdout: 'partial', stderr: 'boom', exitCode: 3 }, big);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('partial');
+    expect(r.content[0].text).toContain('---');
+    expect(r.content[0].text).toContain('[exit 3]');
+    expect(r.content[0].text).toContain('boom');
+  });
+
+  it('stderr with exit 0 is shown but not an error', () => {
+    const r = formatCommandResult({ stdout: 'out', stderr: 'warning', exitCode: 0 }, big);
+    expect(r.isError).toBeUndefined();
+    expect(r.content[0].text).toContain('[exit 0]');
+    expect(r.content[0].text).toContain('warning');
+  });
+
+  it('signal termination reports [killed by SIG...] and isError', () => {
+    const r = formatCommandResult({ stdout: '', stderr: '', exitCode: null, signal: 'TERM' }, big);
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain('[killed by SIGTERM]');
+  });
+});

@@ -46,3 +46,41 @@ export function truncateMiddle(text: string, maxBytes: number): string {
   const sep = head.endsWith('\n') ? '' : '\n';
   return `${head}${sep}[… ${formatBytes(omitted.length)} / ${omittedLines} linhas omitidos …]\n${tail}`;
 }
+
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal?: string | null;
+}
+
+export function formatCommandResult(
+  result: CommandResult,
+  maxBytes: number,
+): { content: { type: 'text'; text: string }[]; isError?: boolean } {
+  const { stdout, stderr, exitCode, signal } = result;
+  const outText = truncateMiddle(stdout, maxBytes);
+  const hasStderr = stderr.trim().length > 0;
+  const killedBySignal = (exitCode === null || exitCode === undefined) && !!signal;
+
+  if (exitCode === 0 && !hasStderr) {
+    return { content: [{ type: 'text', text: outText }] };
+  }
+
+  const lines: string[] = [];
+  if (outText.length > 0) lines.push(outText);
+  lines.push('---');
+  lines.push(killedBySignal ? `[killed by SIG${signal}]` : `[exit ${exitCode}]`);
+  if (hasStderr) {
+    lines.push('stderr:');
+    lines.push(truncateMiddle(stderr, maxBytes));
+  }
+
+  const out: { content: { type: 'text'; text: string }[]; isError?: boolean } = {
+    content: [{ type: 'text', text: lines.join('\n') }],
+  };
+  if ((exitCode !== 0 && exitCode !== null && exitCode !== undefined) || killedBySignal) {
+    out.isError = true;
+  }
+  return out;
+}
