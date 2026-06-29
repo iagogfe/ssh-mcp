@@ -9,7 +9,7 @@ import { createHash, createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { formatCommandResult, CommandResult } from './output.js';
+import { formatCommandResult, CommandResult, parseMaxBytes } from './output.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -80,6 +80,19 @@ const MAX_CHARS = (() => {
   }
   return 1000;
 })();
+
+// Output truncation budget (bytes per stream). 0/none disables. Default 8 KB.
+const MAX_OUTPUT_BYTES = parseMaxBytes(
+  argvConfig.maxOutputBytes ?? process.env.SSH_MCP_MAX_OUTPUT_BYTES,
+  8192,
+);
+
+// Resolve the effective limit for a single tool call (per-call override wins).
+function resolveMaxBytes(callMax: number | undefined): number {
+  if (callMax === undefined) return MAX_OUTPUT_BYTES;
+  if (callMax <= 0) return 0;
+  return callMax;
+}
 
 function validateConfig(config: Record<string, string | null>) {
   const errors = [];
@@ -546,8 +559,9 @@ server.tool(
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
     description: z.string().optional().describe("Optional description of what this command will do"),
+    maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
   },
-  async ({ command, description }) => {
+  async ({ command, description, maxBytes }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
@@ -603,7 +617,7 @@ server.tool(
         ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
         : sanitizedCommand;
 
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
+      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -621,8 +635,9 @@ if (!DISABLE_SUDO) {
     {
       command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
       description: z.string().optional().describe("Optional description of what this command will do"),
+      maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
     },
-    async ({ command, description }) => {
+    async ({ command, description, maxBytes }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
@@ -679,7 +694,7 @@ if (!DISABLE_SUDO) {
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-          return await execSshCommandWithConnection(connectionManager, wrapped);
+          return await execSshCommandWithConnection(connectionManager, wrapped, undefined, resolveMaxBytes(maxBytes));
         }
 
         // Password provided — feed it to `sudo -S` over the channel's stdin instead
@@ -688,7 +703,7 @@ if (!DISABLE_SUDO) {
         // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
         // password is always read from the first line of stdin.
         wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n');
+        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
