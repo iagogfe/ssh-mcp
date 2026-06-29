@@ -9,6 +9,7 @@ import { createHash, createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { formatCommandResult, parseMaxBytes } from './output.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -79,6 +80,19 @@ const MAX_CHARS = (() => {
   }
   return 1000;
 })();
+
+// Output truncation budget (bytes per stream). 0/none disables. Default 8 KB.
+const MAX_OUTPUT_BYTES = parseMaxBytes(
+  argvConfig.maxOutputBytes ?? process.env.SSH_MCP_MAX_OUTPUT_BYTES,
+  8192,
+);
+
+// Resolve the effective limit for a single tool call (per-call override wins).
+function resolveMaxBytes(callMax: number | undefined): number {
+  if (callMax === undefined) return MAX_OUTPUT_BYTES;
+  if (callMax <= 0) return 0;
+  return callMax;
+}
 
 function validateConfig(config: Record<string, string | null>) {
   const errors = [];
@@ -545,8 +559,9 @@ server.tool(
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
     description: z.string().optional().describe("Optional description of what this command will do"),
+    maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
   },
-  async ({ command, description }) => {
+  async ({ command, description, maxBytes }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
@@ -602,7 +617,7 @@ server.tool(
         ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
         : sanitizedCommand;
 
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
+      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -620,8 +635,9 @@ if (!DISABLE_SUDO) {
     {
       command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
       description: z.string().optional().describe("Optional description of what this command will do"),
+      maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
     },
-    async ({ command, description }) => {
+    async ({ command, description, maxBytes }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
@@ -678,7 +694,7 @@ if (!DISABLE_SUDO) {
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-          return await execSshCommandWithConnection(connectionManager, wrapped);
+          return await execSshCommandWithConnection(connectionManager, wrapped, undefined, resolveMaxBytes(maxBytes));
         }
 
         // Password provided — feed it to `sudo -S` over the channel's stdin instead
@@ -687,7 +703,7 @@ if (!DISABLE_SUDO) {
         // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
         // password is always read from the first line of stdin.
         wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n');
+        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -697,15 +713,19 @@ if (!DISABLE_SUDO) {
 }
 
 // New function that uses persistent connection
-export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string, stdin?: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+export async function execSshCommandWithConnection(
+  manager: SSHConnectionManager,
+  command: string,
+  stdin?: string,
+  maxBytes: number = 8192,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
 
     const conn = manager.getConnection();
-    const shell = (manager as any).suShell;  // Use su shell if available
+    const shell = (manager as any).suShell;
 
-    // Set up timeout
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
@@ -713,9 +733,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       }
     }, DEFAULT_TIMEOUT);
 
-    // If we have an active su shell, use it directly (commands run as root in session).
-    // We fence the command between two unique sentinels so we can locate its exact
-    // output regardless of what the command prints, and capture its exit code.
+    // Persistent su shell: fence the command and capture its exit code.
     if (shell) {
       let buffer = '';
       const token = manager.nextToken();
@@ -724,7 +742,6 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
 
       const dataHandler = (data: Buffer) => {
         buffer += data.toString();
-
         const endMatch = buffer.match(endRe);
         if (!endMatch) return;
         if (isResolved) return;
@@ -732,32 +749,24 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         clearTimeout(timeoutId);
         shell.removeListener('data', dataHandler);
 
-        // Output is everything between the begin sentinel's output line and the
-        // end sentinel. (PTY echo is disabled during elevation, so input lines
-        // don't appear here.)
         const beginMatch = buffer.match(beginRe);
         let output = beginMatch
           ? buffer.slice((beginMatch.index as number) + beginMatch[0].length, endMatch.index)
           : buffer.slice(0, endMatch.index);
         output = output.replace(/\r/g, '').replace(/\n+$/, '');
-
-        resolve({
-          content: [{
-            type: 'text',
-            text: output + (output ? '\n' : ''),
-          }],
-        });
+        const exitCode = parseInt(endMatch[1], 10);
+        const text = output + (output ? '\n' : '');
+        resolve(formatCommandResult({ stdout: text, stderr: '', exitCode }, maxBytes));
       };
 
       shell.on('data', dataHandler);
-      // Begin sentinel, the command, then an end sentinel carrying the exit code.
       shell.write(sentinelEcho('BEGIN', token) + '\n');
       shell.write(command + '\n');
       shell.write('__rc=$?; ' + sentinelEcho('END', token, ':$__rc') + '\n');
       return;
     }
 
-    // No persistent su shell; use normal exec with optional password piping
+    // Normal exec: collect stdout/stderr and the exit code/signal from close.
     conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
@@ -771,38 +780,19 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       let stdout = '';
       let stderr = '';
 
-      // If stdin provided (e.g., sudo password), write it
       if (stdin && stdin.length > 0) {
-        try {
-          stream.write(stdin);
-        } catch (e) {
-          console.error('Error writing to stdin:', e);
-        }
+        try { stream.write(stdin); } catch (e) { console.error('Error writing to stdin:', e); }
       }
       try { stream.end(); } catch (e) { /* ignore */ }
 
-      stream.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
+      stream.on('data', (data: Buffer) => { stdout += data.toString(); });
+      stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
-      stream.stderr.on('data', (data: Buffer) => {
-        stderr += data.toString();
-      });
-
-      stream.on('close', (code: number, signal: string) => {
+      stream.on('close', (code: number | null, signal: string | null) => {
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
-          if (stderr) {
-            reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
-          } else {
-            resolve({
-              content: [{
-                type: 'text',
-                text: stdout,
-              }],
-            });
-          }
+          resolve(formatCommandResult({ stdout, stderr, exitCode: code, signal }, maxBytes));
         }
       });
     });
@@ -810,7 +800,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
 }
 
 // Keep the old function for backward compatibility (used in tests)
-export async function execSshCommand(sshConfig: any, command: string, stdin?: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+export async function execSshCommand(sshConfig: any, command: string, stdin?: string, maxBytes: number = 8192): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let timeoutId: NodeJS.Timeout;
@@ -863,21 +853,12 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
         try { stream.end(); } catch (e) { /* ignore */ }
         let stdout = '';
         let stderr = '';
-        stream.on('close', (code: number, signal: string) => {
+        stream.on('close', (code: number | null, signal: string | null) => {
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutId);
             conn.end();
-            if (stderr) {
-              reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
-            } else {
-              resolve({
-                content: [{
-                  type: 'text',
-                  text: stdout,
-                }],
-              });
-            }
+            resolve(formatCommandResult({ stdout, stderr, exitCode: code, signal }, maxBytes));
           }
         });
         stream.on('data', (data: Buffer) => {

@@ -45,12 +45,16 @@
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `maxBytes` (optional): Truncate output to this many bytes. Defaults to the global `--maxOutputBytes` setting. Pass `0` to get full output.
+  - **Result format:** On success (exit 0, no stderr) the tool returns the command's stdout only. Otherwise a footer is appended after a `---` separator: `[exit N]` (or `[no exit code]` / `[killed by SIG…]`), followed by stderr when present. The result is marked as an error (`isError`) only when the exit code is non-zero or the process was killed by a signal — stderr alone with exit 0 is shown but is not an error. Large output is truncated in the middle (per stream); pass `maxBytes: 0` (or `--maxOutputBytes=none`) for full output.
   - **Timeout Configuration:**
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
     - `command` (required): Shell command to execute as root using sudo
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `maxBytes` (optional): Truncate output to this many bytes. Defaults to the global `--maxOutputBytes` setting. Pass `0` to get full output.
+  - **Result format:** On success (exit 0, no stderr) the tool returns the command's stdout only. Otherwise a footer is appended after a `---` separator: `[exit N]` (or `[no exit code]` / `[killed by SIG…]`), followed by stderr when present. The result is marked as an error (`isError`) only when the exit code is non-zero or the process was killed by a signal — stderr alone with exit 0 is shown but is not an error. Large output is truncated in the middle (per stream); pass `maxBytes: 0` (or `--maxOutputBytes=none`) for full output.
   - **Notes:**
     - Requires `--sudoPassword` to be set for password-protected sudo
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
@@ -93,6 +97,7 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `suPassword`: Password for su elevation (when you need a persistent root shell)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
+- `maxOutputBytes`: Truncate command output to this many bytes per stream (head+tail, with a marker). Default: `8192`. Use `none` or `0` to disable.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
 
 **Host Key Verification (defends against man-in-the-middle attacks):**
