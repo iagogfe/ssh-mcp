@@ -84,3 +84,14 @@ export function formatCommandResult(
   }
   return out;
 }
+
+// Parse a maxOutputBytes config value. def when unset/NaN; 0 (disabled) for
+// "none" or non-positive; otherwise the positive integer.
+export function parseMaxBytes(raw: string | null | undefined, def: number): number {
+  if (typeof raw !== 'string') return def;
+  if (raw.toLowerCase() === 'none') return 0;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed)) return def;
+  if (parsed <= 0) return 0;
+  return parsed;
+}

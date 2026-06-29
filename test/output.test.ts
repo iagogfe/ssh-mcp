@@ -100,3 +100,22 @@ describe('formatCommandResult', () => {
     expect(r.content[0].text).toContain('[killed by SIGTERM]');
   });
 });
+
+import { parseMaxBytes } from '../src/output';
+
+describe('parseMaxBytes', () => {
+  it('uses the default when unset or not a number', () => {
+    expect(parseMaxBytes(undefined, 8192)).toBe(8192);
+    expect(parseMaxBytes(null, 8192)).toBe(8192);
+    expect(parseMaxBytes('abc', 8192)).toBe(8192);
+  });
+  it('treats none / 0 / negative as disabled (0)', () => {
+    expect(parseMaxBytes('none', 8192)).toBe(0);
+    expect(parseMaxBytes('NONE', 8192)).toBe(0);
+    expect(parseMaxBytes('0', 8192)).toBe(0);
+    expect(parseMaxBytes('-5', 8192)).toBe(0);
+  });
+  it('parses a positive integer', () => {
+    expect(parseMaxBytes('16384', 8192)).toBe(16384);
+  });
+});
