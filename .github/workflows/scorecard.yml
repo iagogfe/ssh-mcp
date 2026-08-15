@@ -18,6 +18,9 @@ permissions: read-all
 jobs:
   analise:
     name: Análise do Scorecard
+    # Mesmo motivo do CodeQL: publica SARIF, o que exige code scanning, que só é
+    # gratuito em repositório público. Se habilita sozinho quando for a hora.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     permissions:
       security-events: write # publica o SARIF na aba Security
