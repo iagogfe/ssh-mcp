@@ -29,14 +29,14 @@ describe('maxOutputBytes truncation', () => {
   it('truncates large output by default', async () => {
     const res = await callExec('seq 1 100000');
     const text = res.result.content[0].text as string;
-    expect(text).toContain('linhas omitidos');
+    expect(text).toContain('lines omitted');
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThan(20000);
   }, 30000);
 
   it('--maxOutputBytes=none disables truncation', async () => {
     const res = await callExec('seq 1 5000', ['--maxOutputBytes=none']);
     const text = res.result.content[0].text as string;
-    expect(text).not.toContain('omitidos');
+    expect(text).not.toContain('omitted');
     expect(text.trimEnd().endsWith('5000')).toBe(true);
   }, 30000);
 });

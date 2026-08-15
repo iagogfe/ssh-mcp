@@ -391,6 +391,14 @@ export class SSHConnectionManager {
     return this.conn !== null && (this.conn as any)._sock && !(this.conn as any)._sock.destroyed;
   }
 
+  // Whether commands currently run inside the persistent root shell established by
+  // `su -`. Callers must not wrap a command in `sudo` when this is true: the su
+  // shell branch of execSshCommandWithConnection has no stdin channel to feed
+  // `sudo -S` a password with.
+  isRootShell(): boolean {
+    return this.isElevated && !!this.suShell;
+  }
+
   getSudoPassword(): string | undefined {
     return this.sshConfig.sudoPassword;
   }
@@ -681,6 +689,15 @@ if (!DISABLE_SUDO) {
                   ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
                   : sanitizedCommand;
 
+                // Already root through the persistent `su -` shell: run the command as
+                // is. Wrapping it in `sudo -S` there would hang — that shell branch has
+                // no stdin channel to feed the password through — and feeding the
+                // password into the shell instead would echo it back as a failed command
+                // whenever sudo did not ask for one.
+                if (connectionManager.isRootShell()) {
+                  return await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+                }
+
                 if (!sudoPassword) {
                   // No password provided, use -n to fail if sudo requires a password
                   wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
@@ -711,6 +728,10 @@ export async function execSshCommandWithConnection(
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
+    // Detaches the persistent shell's data listener. Set once that listener is
+    // registered; the timeout path must run it too, or a timed-out command leaves
+    // its handler buffering every byte the shell emits for the rest of the session.
+    let detachShellListener: (() => void) | null = null;
 
     const conn = manager.getConnection();
     const shell = (manager as any).suShell;
@@ -718,6 +739,7 @@ export async function execSshCommandWithConnection(
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
+        detachShellListener?.();
         reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
@@ -749,6 +771,7 @@ export async function execSshCommandWithConnection(
       };
 
       shell.on('data', dataHandler);
+      detachShellListener = () => shell.removeListener('data', dataHandler);
       shell.write(sentinelEcho('BEGIN', token) + '\n');
       shell.write(command + '\n');
       shell.write('__rc=$?; ' + sentinelEcho('END', token, ':$__rc') + '\n');

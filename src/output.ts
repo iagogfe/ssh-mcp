@@ -44,7 +44,7 @@ export function truncateMiddle(text: string, maxBytes: number): string {
   const head = buf.subarray(0, headEnd).toString('utf8');
   const tail = buf.subarray(tailStart).toString('utf8');
   const sep = head.endsWith('\n') ? '' : '\n';
-  return `${head}${sep}[… ${formatBytes(omitted.length)} / ${omittedLines} linhas omitidos …]\n${tail}`;
+  return `${head}${sep}[… ${formatBytes(omitted.length)} / ${omittedLines} lines omitted …]\n${tail}`;
 }
 
 export interface CommandResult {

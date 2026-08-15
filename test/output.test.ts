@@ -23,14 +23,14 @@ describe('truncateMiddle', () => {
     expect(Buffer.byteLength(out, 'utf8')).toBeLessThan(Buffer.byteLength(lines, 'utf8'));
     expect(out.startsWith('line0')).toBe(true);
     expect(out.endsWith('line999')).toBe(true);
-    expect(out).toContain('linhas omitidos');
+    expect(out).toContain('lines omitted');
   });
 
   it('does not split a multibyte code point (no U+FFFD)', () => {
     const s = 'áé😀'.repeat(2000); // multibyte throughout
     const out = truncateMiddle(s, 300);
     expect(out).not.toContain('�');
-    expect(out).toContain('omitidos');
+    expect(out).toContain('omitted');
   });
 
   it('tail line-snap does not collapse tail when newline is near end of buffer', () => {
@@ -61,7 +61,7 @@ describe('truncateMiddle', () => {
   it('long single-line (no newlines) is truncated by byte boundary, stays valid UTF-8, contains marker', () => {
     const s = 'x'.repeat(5000);
     const out = truncateMiddle(s, 200);
-    expect(out).toContain('omitidos');
+    expect(out).toContain('omitted');
     expect(out).not.toContain('�');
     expect(Buffer.byteLength(out, 'utf8')).toBeLessThanOrEqual(200 + 120);
   });
@@ -110,7 +110,7 @@ describe('formatCommandResult', () => {
   it('truncation is wired inside formatCommandResult (tiny maxBytes)', () => {
     const longStdout = 'line\n'.repeat(5000); // ~25 KB
     const r = formatCommandResult({ stdout: longStdout, stderr: '', exitCode: 0 }, 10);
-    expect(r.content[0].text).toContain('linhas omitidos');
+    expect(r.content[0].text).toContain('lines omitted');
   });
 });
 
