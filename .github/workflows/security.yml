@@ -14,6 +14,7 @@ on:
   schedule:
     # CVE nova aparece sem ninguém commitar nada.
     - cron: '31 5 * * 1'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
