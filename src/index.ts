@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { McpServer, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createHash, createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
@@ -111,18 +110,18 @@ if (isCliEnabled) {
 // Command sanitization and validation
 export function sanitizeCommand(command: string): string {
   if (typeof command !== 'string') {
-    throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
+    throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Command must be a string');
   }
 
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
-    throw new McpError(ErrorCode.InvalidParams, 'Command cannot be empty');
+    throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Command cannot be empty');
   }
 
   // Length check
   if (Number.isFinite(MAX_CHARS) && trimmedCommand.length > (MAX_CHARS as number)) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
       `Command is too long (max ${MAX_CHARS} characters)`
     );
   }
@@ -337,7 +336,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
-        reject(new McpError(ErrorCode.InternalError, 'SSH connection timeout'));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, 'SSH connection timeout'));
       }, 30000); // 30 seconds connection timeout
 
       this.conn.on('ready', async () => {
@@ -365,7 +364,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
-        reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
       });
 
       this.conn.on('end', () => {
@@ -430,14 +429,14 @@ export class SSHConnectionManager {
       // Add a safety timeout so elevation doesn't hang forever
       const timeoutId = setTimeout(() => {
         this.suPromise = null;
-        reject(new McpError(ErrorCode.InternalError, 'su elevation timed out'));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, 'su elevation timed out'));
       }, 10000);  // 10 second timeout for elevation
 
       conn.shell({ term: 'xterm', cols: 80, rows: 24 }, (err: Error | undefined, stream: ClientChannel) => {
         if (err) {
           clearTimeout(timeoutId);
           this.suPromise = null;
-          reject(new McpError(ErrorCode.InternalError, `Failed to start interactive shell for su: ${err.message}`));
+          reject(new ProtocolError(ProtocolErrorCode.InternalError, `Failed to start interactive shell for su: ${err.message}`));
           return;
         }
 
@@ -455,7 +454,7 @@ export class SSHConnectionManager {
           cleanup();
           try { stream.end(); } catch (e) { /* ignore */ }
           this.suPromise = null;
-          reject(new McpError(ErrorCode.InternalError, msg));
+          reject(new ProtocolError(ProtocolErrorCode.InternalError, msg));
         };
 
         const onData = (data: Buffer) => {
@@ -500,7 +499,7 @@ export class SSHConnectionManager {
           clearTimeout(timeoutId);
           if (!this.isElevated) {
             this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, 'su shell closed before elevation completed'));
+            reject(new ProtocolError(ProtocolErrorCode.InternalError, 'su shell closed before elevation completed'));
           }
         });
 
@@ -520,7 +519,7 @@ export class SSHConnectionManager {
 
   getConnection(): Client {
     if (!this.conn) {
-      throw new McpError(ErrorCode.InternalError, 'SSH connection not established');
+      throw new ProtocolError(ProtocolErrorCode.InternalError, 'SSH connection not established');
     }
     return this.conn;
   }
@@ -553,163 +552,153 @@ const server = new McpServer(
   },
 );
 
-server.tool(
-  "exec",
-  "Execute a shell command on the remote SSH server and return the output.",
-  {
-    command: z.string().describe("Shell command to execute on the remote SSH server"),
-    description: z.string().optional().describe("Optional description of what this command will do"),
-    maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
-  },
-  async ({ command, description, maxBytes }) => {
-    // Sanitize command input
-    const sanitizedCommand = sanitizeCommand(command);
+server.registerTool("exec", { description: "Execute a shell command on the remote SSH server and return the output.", inputSchema: z.object({
+        command: z.string().describe("Shell command to execute on the remote SSH server"),
+        description: z.string().optional().describe("Optional description of what this command will do"),
+        maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
+      }) }, async ({ command, description, maxBytes }) => {
+        // Sanitize command input
+        const sanitizedCommand = sanitizeCommand(command);
 
-    try {
-      // Initialize connection manager if not already done
-      if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-        }
-        const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
-          hostFingerprint: HOST_FINGERPRINT,
-          knownHostsPath: KNOWN_HOSTS_PATH,
-          insecureHostKey: INSECURE_HOST_KEY,
-        };
-
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
-          const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-        }
-
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-        }
-        connectionManager = new SSHConnectionManager(sshConfig);
-      }
-
-      // Ensure connection is active (reconnect if needed)
-      await connectionManager.ensureConnected();
-
-      // If a suPassword was provided, explicitly wait for elevation before executing.
-      // This is critical: ensureElevated is idempotent and will return immediately if
-      // already elevated, so this ensures we have a su shell before we try to use it.
-      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
         try {
-          const elevationPromise = (connectionManager as any).ensureElevated();
-          // Add a short timeout for elevation to complete
-          await Promise.race([
-            elevationPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
-          ]);
-        } catch (err) {
-          // Log but don't fail; fall back to non-elevated execution if elevation times out
+          // Initialize connection manager if not already done
+          if (!connectionManager) {
+            if (!HOST || !USER) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required host or username');
+            }
+            const sshConfig: SSHConfig = {
+              host: HOST,
+              port: PORT,
+              username: USER,
+              hostFingerprint: HOST_FINGERPRINT,
+              knownHostsPath: KNOWN_HOSTS_PATH,
+              insecureHostKey: INSECURE_HOST_KEY,
+            };
+
+            if (PASSWORD) {
+              sshConfig.password = PASSWORD;
+            } else if (KEY) {
+              const fs = await import('fs/promises');
+              sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+            }
+
+            if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+              sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+            }
+            connectionManager = new SSHConnectionManager(sshConfig);
+          }
+
+          // Ensure connection is active (reconnect if needed)
+          await connectionManager.ensureConnected();
+
+          // If a suPassword was provided, explicitly wait for elevation before executing.
+          // This is critical: ensureElevated is idempotent and will return immediately if
+          // already elevated, so this ensures we have a su shell before we try to use it.
+          if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
+            try {
+              const elevationPromise = (connectionManager as any).ensureElevated();
+              // Add a short timeout for elevation to complete
+              await Promise.race([
+                elevationPromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
+              ]);
+            } catch (err) {
+              // Log but don't fail; fall back to non-elevated execution if elevation times out
+            }
+          }
+
+          // Append description as comment if provided
+          const commandWithDescription = description
+            ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
+            : sanitizedCommand;
+
+          const result = await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+          return result;
+        } catch (err: any) {
+          // Wrap unexpected errors
+          if (err instanceof ProtocolError) throw err;
+          throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
         }
-      }
-
-      // Append description as comment if provided
-      const commandWithDescription = description
-        ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
-        : sanitizedCommand;
-
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
-      return result;
-    } catch (err: any) {
-      // Wrap unexpected errors
-      if (err instanceof McpError) throw err;
-      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
-    }
-  }
-);
+      });
 
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
-  server.tool(
-    "sudo-exec",
-    "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
-    {
-      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-      description: z.string().optional().describe("Optional description of what this command will do"),
-      maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
-    },
-    async ({ command, description, maxBytes }) => {
-      const sanitizedCommand = sanitizeCommand(command);
+  server.registerTool("sudo-exec", { description: "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.", inputSchema: z.object({
+              command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+              description: z.string().optional().describe("Optional description of what this command will do"),
+              maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
+            }) }, async ({ command, description, maxBytes }) => {
+              const sanitizedCommand = sanitizeCommand(command);
 
-      try {
-        if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-          }
+              try {
+                if (!connectionManager) {
+                  if (!HOST || !USER) {
+                    throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required host or username');
+                  }
 
-          const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
-            hostFingerprint: HOST_FINGERPRINT,
-            knownHostsPath: KNOWN_HOSTS_PATH,
-            insecureHostKey: INSECURE_HOST_KEY,
-          };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
-            const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-          }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-          }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-          }
-          connectionManager = new SSHConnectionManager(sshConfig);
-        }
+                  const sshConfig: SSHConfig = {
+                    host: HOST,
+                    port: PORT || 22,
+                    username: USER,
+                    hostFingerprint: HOST_FINGERPRINT,
+                    knownHostsPath: KNOWN_HOSTS_PATH,
+                    insecureHostKey: INSECURE_HOST_KEY,
+                  };
+                  if (PASSWORD) {
+                    sshConfig.password = PASSWORD;
+                  } else if (KEY) {
+                    const fs = await import('fs/promises');
+                    sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+                  }
+                  if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+                    sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+                  }
+                  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+                    sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
+                  }
+                  connectionManager = new SSHConnectionManager(sshConfig);
+                }
 
-        await connectionManager.ensureConnected();
+                await connectionManager.ensureConnected();
 
-        // If suPassword or sudoPassword were provided on this call but the
-        // existing connection manager was created earlier without them,
-        // update the manager's values so the subsequent sudo-exec call uses
-        // the latest passwords.
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
-        }
-        if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-          // update sudoPassword on the manager instance
-          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
-        }
+                // If suPassword or sudoPassword were provided on this call but the
+                // existing connection manager was created earlier without them,
+                // update the manager's values so the subsequent sudo-exec call uses
+                // the latest passwords.
+                if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+                  await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
+                }
+                if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+                  // update sudoPassword on the manager instance
+                  (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
+                }
 
-        let wrapped: string;
-        const sudoPassword = connectionManager.getSudoPassword();
+                let wrapped: string;
+                const sudoPassword = connectionManager.getSudoPassword();
 
-        // Append description as comment if provided
-        const commandWithDescription = description
-          ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
-          : sanitizedCommand;
+                // Append description as comment if provided
+                const commandWithDescription = description
+                  ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
+                  : sanitizedCommand;
 
-        if (!sudoPassword) {
-          // No password provided, use -n to fail if sudo requires a password
-          wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-          return await execSshCommandWithConnection(connectionManager, wrapped, undefined, resolveMaxBytes(maxBytes));
-        }
+                if (!sudoPassword) {
+                  // No password provided, use -n to fail if sudo requires a password
+                  wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+                  return await execSshCommandWithConnection(connectionManager, wrapped, undefined, resolveMaxBytes(maxBytes));
+                }
 
-        // Password provided — feed it to `sudo -S` over the channel's stdin instead
-        // of embedding it in the command string. Embedding it (e.g. via `printf <pwd> |`)
-        // would expose the password in the remote process list (`ps`) and shell history.
-        // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
-        // password is always read from the first line of stdin.
-        wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
-      } catch (err: any) {
-        if (err instanceof McpError) throw err;
-        throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
-      }
-    }
-  );
+                // Password provided — feed it to `sudo -S` over the channel's stdin instead
+                // of embedding it in the command string. Embedding it (e.g. via `printf <pwd> |`)
+                // would expose the password in the remote process list (`ps`) and shell history.
+                // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
+                // password is always read from the first line of stdin.
+                wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+                return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
+              } catch (err: any) {
+                if (err instanceof ProtocolError) throw err;
+                throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+              }
+            });
 }
 
 // New function that uses persistent connection
@@ -729,7 +718,7 @@ export async function execSshCommandWithConnection(
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
-        reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
 
@@ -772,7 +761,7 @@ export async function execSshCommandWithConnection(
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
-          reject(new McpError(ErrorCode.InternalError, `SSH exec error: ${err.message}`));
+          reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH exec error: ${err.message}`));
         }
         return;
       }
@@ -827,7 +816,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
             conn.end();
           }
         });
-        reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
 
@@ -837,7 +826,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutId);
-            reject(new McpError(ErrorCode.InternalError, `SSH exec error: ${err.message}`));
+            reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH exec error: ${err.message}`));
           }
           conn.end();
           return;
@@ -873,21 +862,25 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
       if (!isResolved) {
         isResolved = true;
         clearTimeout(timeoutId);
-        reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
       }
     });
     conn.connect(buildConnectConfig(sshConfig));
   });
 }
 
+// ponytail: stdio serves exactly one connection per process, so the factory hands
+// back the module-level singleton instead of building a fresh instance per call.
+const serverFactory = () => server;
+
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const handle = serveStdio(serverFactory);
   console.error("SSH MCP Server running on stdio");
 
   // Handle graceful shutdown
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
+    void handle.close();
     if (connectionManager) {
       connectionManager.close();
       connectionManager = null;
@@ -906,10 +899,8 @@ async function main() {
 
 // Initialize server in test mode for automated tests
 if (isTestMode) {
-  const transport = new StdioServerTransport();
-  server.connect(transport).catch(error => {
-    console.error("Fatal error connecting server:", error);
-    process.exit(1);
+  serveStdio(serverFactory, {
+    onerror: (error) => console.error("Server error:", error),
   });
 }
 // Start server in CLI mode
