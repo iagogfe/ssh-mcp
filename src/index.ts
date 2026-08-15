@@ -452,7 +452,7 @@ export class SSHConnectionManager {
         let passwordSent = false;
         let probeSent = false;
         const readyToken = this.nextToken();
-        const readyRe = new RegExp('SSH_MCP_READY_' + readyToken);
+        const readyMark = `SSH_MCP_READY_${readyToken}`;
         const authFailRe = /authentication failure|incorrect password|su: .*fail/i;
         const cleanup = () => {
           try { stream.removeAllListeners('data'); } catch (e) { /* ignore */ }
@@ -490,7 +490,7 @@ export class SSHConnectionManager {
           }
 
           // Accept the elevated shell only once our readiness sentinel is echoed back.
-          if (probeSent && readyRe.test(buffer)) {
+          if (probeSent && buffer.includes(readyMark)) {
             clearTimeout(timeoutId);
             cleanup();
             this.suShell = stream;
@@ -748,24 +748,38 @@ export async function execSshCommandWithConnection(
     if (shell) {
       let buffer = '';
       const token = manager.nextToken();
-      const beginRe = new RegExp('SSH_MCP_BEGIN_' + token + '\\r?\\n');
-      const endRe = new RegExp('SSH_MCP_END_' + token + ':(\\d+)');
+      // Plain string search rather than a RegExp built from the token: the exit
+      // code must be read only once its line is complete. A `:(\d+)` match fires
+      // on the first digit that arrives, so an exit code of 10 split across two
+      // reads would be reported as 1.
+      const beginMark = `SSH_MCP_BEGIN_${token}`;
+      const endMark = `SSH_MCP_END_${token}:`;
 
       const dataHandler = (data: Buffer) => {
         buffer += data.toString();
-        const endMatch = buffer.match(endRe);
-        if (!endMatch) return;
+        const endIdx = buffer.indexOf(endMark);
+        if (endIdx === -1) return;
+
+        const digits = buffer.slice(endIdx + endMark.length);
+        const eol = digits.search(/[\r\n]/);
+        if (eol === -1) return; // exit code still arriving
+        const exitCode = parseInt(digits.slice(0, eol), 10);
+        if (Number.isNaN(exitCode)) return;
+
         if (isResolved) return;
         isResolved = true;
         clearTimeout(timeoutId);
         shell.removeListener('data', dataHandler);
 
-        const beginMatch = buffer.match(beginRe);
-        let output = beginMatch
-          ? buffer.slice((beginMatch.index as number) + beginMatch[0].length, endMatch.index)
-          : buffer.slice(0, endMatch.index);
+        // Output starts after the BEGIN sentinel's own line.
+        const beginIdx = buffer.indexOf(beginMark);
+        let start = 0;
+        if (beginIdx !== -1) {
+          const nl = buffer.indexOf('\n', beginIdx);
+          start = nl === -1 ? beginIdx + beginMark.length : nl + 1;
+        }
+        let output = buffer.slice(start, endIdx);
         output = output.replace(/\r/g, '').replace(/\n+$/, '');
-        const exitCode = parseInt(endMatch[1], 10);
         const text = output + (output ? '\n' : '');
         resolve(formatCommandResult({ stdout: text, stderr: '', exitCode }, maxBytes));
       };

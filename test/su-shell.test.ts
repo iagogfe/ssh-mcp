@@ -50,6 +50,19 @@ describe('persistent su shell', () => {
     expect(result.content[0].text.trim()).toBe('0');
   });
 
+  it('reads a multi-digit exit code that arrives split across reads', async () => {
+    const { manager, shell } = elevatedManager();
+    const pending = execSshCommandWithConnection(manager, 'exit 10', undefined, 8192);
+
+    const token = shell.written[0].match(/SSH_MCP""_BEGIN_(\w+)/)![1];
+    // The first chunk ends mid-number: reading it eagerly would report exit 1.
+    shell.emit('data', Buffer.from(`SSH_MCP_BEGIN_${token}\nSSH_MCP_END_${token}:1`));
+    shell.emit('data', Buffer.from('0\n'));
+
+    const result = await pending;
+    expect(result.content[0].text).toContain('[exit 10]');
+  });
+
   it('marks a non-zero fenced exit code as an error', async () => {
     const { manager, shell } = elevatedManager();
     const pending = execSshCommandWithConnection(manager, 'false', undefined, 8192);
