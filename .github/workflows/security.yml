@@ -68,11 +68,18 @@ jobs:
 
   codeql:
     name: SAST (CodeQL)
-    # Análise semântica do próprio GitHub, gratuita apenas em repositório
-    # público. Complementa o Semgrep em vez de substituir: o CodeQL segue fluxo
-    # de dados entre arquivos, onde o Semgrep casa padrão local. Vale mais aqui
-    # do que na média: este servidor monta linhas de shell a partir de entrada
-    # que vem de um modelo, e é exatamente esse tipo de fluxo que ele rastreia.
+    # Análise semântica do próprio GitHub. Complementa o Semgrep em vez de
+    # substituir: o CodeQL segue fluxo de dados entre arquivos, onde o Semgrep
+    # casa padrão local. Vale mais aqui do que na média: este servidor monta
+    # linhas de shell a partir de entrada que vem de um modelo, e é exatamente
+    # esse tipo de fluxo que ele rastreia.
+    #
+    # O guard existe porque o code scanning só é gratuito em repositório
+    # público: a análise roda igual num privado, mas o upload do SARIF falha com
+    # "Code scanning is not enabled for this repository". Rodar e falhar no
+    # último passo é pior do que não rodar — o job se habilita sozinho no dia em
+    # que o repositório virar público.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     permissions:
       contents: read
