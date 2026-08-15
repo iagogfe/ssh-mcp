@@ -1,8 +1,8 @@
 {
-  "name": "ssh-mcp",
+  "name": "@iagogfe/ssh-mcp",
   "license": "MIT",
   "version": "1.5.0",
-  "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
+  "description": "MCP server exposing SSH control for Linux and Windows systems. Fork of tufantunc/ssh-mcp on the MCP SDK v2 (2026-07-28 spec), with host key verification, env-var secrets and output truncation.",
   "type": "module",
   "bin": {
     "ssh-mcp": "build/index.js"
@@ -16,7 +16,10 @@
     "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
   },
   "files": [
-    "build"
+    "build",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
@@ -32,13 +35,13 @@
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
-  "homepage": "https://github.com/tufantunc/ssh-mcp#readme",
+  "homepage": "https://github.com/iagogfe/ssh-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tufantunc/ssh-mcp.git"
+    "url": "git+https://github.com/iagogfe/ssh-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/tufantunc/ssh-mcp/issues"
+    "url": "https://github.com/iagogfe/ssh-mcp/issues"
   },
   "keywords": [
     "ssh",
@@ -52,8 +55,15 @@
     "cli",
     "typescript"
   ],
-  "author": "tufantunc",
+  "author": "Iago Gonçalves",
   "engines": {
     "node": ">=20"
+  },
+  "contributors": [
+    "Tufan Tunç (original author of tufantunc/ssh-mcp)"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

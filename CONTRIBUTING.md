@@ -11,9 +11,27 @@ Thank you for your interest in contributing to ssh-mcp! Your help is greatly app
 5. **Test your changes** to ensure nothing is broken.
 6. **Push to your fork** and submit a Pull Request (PR) to the `main` branch.
 
+## Local setup
+
+Node.js 20 or newer is required.
+
+```bash
+npm install
+npm run build
+
+# The suite talks to a real SSH server; docker-compose.yml starts a throwaway one.
+docker compose up -d
+SSH_HOST=127.0.0.1 SSH_PORT=2222 SSH_USER=test SSH_PASSWORD=secret npm test
+```
+
+`src/index.ts` is the whole server: argument parsing, the SSH connection manager, and the
+`exec` / `sudo-exec` tool registrations. `src/output.ts` handles result formatting and
+truncation. Tests live in `test/` and drive the built server over stdio, the same way an
+MCP client does.
+
 ## Code Style
 - Follow the existing code style and conventions.
-- Write clear, descriptive commit messages.
+- Write commit messages in [Conventional Commits](https://www.conventionalcommits.org/) form (`feat:`, `fix:`, `docs:`, `chore:`).
 - Add comments where necessary for clarity.
 
 ## Issues and Bugs

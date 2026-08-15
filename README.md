@@ -1,17 +1,14 @@
 # SSH MCP Server
 
-[![NPM Version](https://img.shields.io/npm/v/ssh-mcp)](https://www.npmjs.com/package/ssh-mcp)
-[![Downloads](https://img.shields.io/npm/dm/ssh-mcp)](https://www.npmjs.com/package/ssh-mcp)
-[![Node Version](https://img.shields.io/node/v/ssh-mcp)](https://nodejs.org/)
-[![License](https://img.shields.io/github/license/tufantunc/ssh-mcp)](./LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/tufantunc/ssh-mcp?style=social)](https://github.com/tufantunc/ssh-mcp/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/tufantunc/ssh-mcp?style=social)](https://github.com/tufantunc/ssh-mcp/forks)
-[![Build Status](https://github.com/tufantunc/ssh-mcp/actions/workflows/publish.yml/badge.svg)](https://github.com/tufantunc/ssh-mcp/actions)
-[![GitHub issues](https://img.shields.io/github/issues/tufantunc/ssh-mcp)](https://github.com/tufantunc/ssh-mcp/issues)
-
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/tufantunc/ssh-mcp)](https://archestra.ai/mcp-catalog/tufantunc__ssh-mcp)
+[![NPM Version](https://img.shields.io/npm/v/@iagogfe/ssh-mcp)](https://www.npmjs.com/package/@iagogfe/ssh-mcp)
+[![Node Version](https://img.shields.io/node/v/@iagogfe/ssh-mcp)](https://nodejs.org/)
+[![License](https://img.shields.io/github/license/iagogfe/ssh-mcp)](./LICENSE)
+[![CI](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
 **SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH.
+
+This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — see [Credits](#credits).
 
 ## Contents
 
@@ -20,8 +17,9 @@
 - [Installation](#installation)
 - [Client Setup](#client-setup)
 - [Testing](#testing)
+- [Security](#security)
 - [Disclaimer](#disclaimer)
-- [Support](#support)
+- [Credits](#credits)
 
 ## Quick Start
 
@@ -35,9 +33,11 @@
 - MCP-compliant server exposing SSH capabilities
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
-- Built with TypeScript and the official MCP SDK
+- Built with TypeScript and the official MCP SDK v2 — serves the [2026-07-28 protocol revision](https://modelcontextprotocol.io/specification/2026-07-28) and still accepts 2025-era clients
+- **Host key verification on by default** (`known_hosts` or pinned fingerprint)
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
+- **Output truncation** (head+tail per stream) to keep large command output from flooding the model's context
 
 ### Tools
 
@@ -71,15 +71,22 @@
 
 ## Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/tufantunc/ssh-mcp.git
-   cd ssh-mcp
-   ```
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+Requires **Node.js 20 or newer**.
+
+No install step is needed to use the server — MCP clients run it through `npx` (see [Client Setup](#client-setup)):
+
+```bash
+npx -y @iagogfe/ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --key=/path/to/private/key
+```
+
+To hack on it locally:
+
+```bash
+git clone https://github.com/iagogfe/ssh-mcp.git
+cd ssh-mcp
+npm install
+npm run build
+```
 
 ## Client Setup
 
@@ -131,8 +138,8 @@ To keep credentials out of the process list (`ps`) and out of committed MCP clie
         "ssh-mcp": {
             "command": "npx",
             "args": [
-                "ssh-mcp",
                 "-y",
+                "@iagogfe/ssh-mcp",
                 "--",
                 "--host=1.2.3.4",
                 "--port=22",
@@ -154,29 +161,29 @@ You can add this MCP server to Claude Code using the `claude mcp add` command. T
 **Basic Installation:**
 
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+claude mcp add --transport stdio ssh-mcp -- npx -y @iagogfe/ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
 ```
 
 **Installation Examples:**
 
 **With Password Authentication:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --port=22 --user=admin --password=your_password
+claude mcp add --transport stdio ssh-mcp -- npx -y @iagogfe/ssh-mcp -- --host=192.168.1.100 --port=22 --user=admin --password=your_password
 ```
 
 **With SSH Key Authentication:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
+claude mcp add --transport stdio ssh-mcp -- npx -y @iagogfe/ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
 ```
 
 **With Custom Timeout and No Character Limit:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+claude mcp add --transport stdio ssh-mcp -- npx -y @iagogfe/ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
 ```
 
 **With Sudo and Su Support:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
+claude mcp add --transport stdio ssh-mcp -- npx -y @iagogfe/ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
 ```
 
 **Installation Scopes:**
@@ -185,17 +192,17 @@ You can specify the scope when adding the server:
 
 - **Local scope** (default): For personal use in the current project
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope local -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  claude mcp add --transport stdio ssh-mcp --scope local -- npx -y @iagogfe/ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
   ```
 
 - **Project scope**: Share with your team via `.mcp.json` file. ⚠️ This file is usually committed to your repository — **do not embed a password here**. Use an SSH key or a `SSH_MCP_PASSWORD` environment variable instead.
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --key=/path/to/private/key
+  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y @iagogfe/ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --key=/path/to/private/key
   ```
 
 - **User scope**: Available across all your projects
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope user -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  claude mcp add --transport stdio ssh-mcp --scope user -- npx -y @iagogfe/ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
   ```
 
 
@@ -216,6 +223,24 @@ You can use the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspe
 npm run inspect
 ```
 
+The test suite needs a throwaway SSH server, which `docker-compose.yml` provides:
+
+```sh
+docker compose up -d
+SSH_HOST=127.0.0.1 SSH_PORT=2222 SSH_USER=test SSH_PASSWORD=secret npm test
+```
+
+## Security
+
+This server executes arbitrary shell commands on a remote host on behalf of an LLM. That is the whole point of it, and it is also its entire risk surface. Before pointing it at anything you care about:
+
+- **Give it its own SSH user** with only the access it needs, not your admin account.
+- **Prefer key authentication**, and pass any password through the `SSH_MCP_*` environment variables rather than CLI flags — flags are visible in `ps` output.
+- **Leave host key verification on.** `--insecureHostKey` disables the MITM defense and exists only for throwaway hosts.
+- **Leave `sudo-exec` off** (`--disableSudo`) unless you need it.
+
+To report a vulnerability, see [SECURITY.md](./SECURITY.md).
+
 ## Disclaimer
 
 SSH MCP Server is provided under the [MIT License](./LICENSE). Use at your own risk. This project is not affiliated with or endorsed by any SSH or MCP provider.
@@ -228,6 +253,13 @@ We welcome contributions! Please see our [Contributing Guidelines](./CONTRIBUTIN
 
 This project follows a [Code of Conduct](./CODE_OF_CONDUCT.md) to ensure a welcoming environment for everyone.
 
-## Support
+## Credits
 
-If you find SSH MCP Server helpful, consider starring the repository or contributing! Pull requests and feedback are welcome. 
+This project is a fork of **[tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp)** by [Tufan Tunç](https://github.com/tufantunc), which is where the SSH MCP server, its tools, and most of this documentation come from. It stays under the same [MIT License](./LICENSE).
+
+This fork adds:
+
+- Migration to the MCP TypeScript SDK v2 and the [2026-07-28 protocol revision](https://modelcontextprotocol.io/specification/2026-07-28)
+- Host key verification enabled by default, with `--hostFingerprint` / `--knownHosts` / `--insecureHostKey`
+- Secrets via `SSH_MCP_*` environment variables instead of CLI flags
+- Exit-code-aware tool results and head+tail output truncation (`--maxOutputBytes` / `maxBytes`)
