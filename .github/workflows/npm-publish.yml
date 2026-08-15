@@ -1,0 +1,114 @@
+# Publicação no npm, disparada por release ou manualmente.
+#
+# O nome do pacote e a versão são lidos do package.json, nunca escritos à mão
+# aqui — o guard só guarda alguma coisa se consultar o mesmo pacote que publica.
+
+name: Publicar no npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'dist-tag do npm (latest, beta, next)'
+        required: true
+        default: 'latest'
+
+permissions:
+  contents: read
+
+jobs:
+  publicar:
+    name: Publicar no registro do npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # anexa o tarball na release
+      id-token: write # procedência do npm (npm publish --provenance)
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Build
+        run: npm run build
+
+      - name: Conferir os artefatos de build
+        run: |
+          for alvo in build/index.js build/output.js; do
+            if [ ! -e "$alvo" ]; then
+              echo "::error::build não gerou $alvo"
+              exit 1
+            fi
+          done
+
+      - name: Ler nome e versão do package.json
+        id: pkg
+        run: |
+          set -euo pipefail
+          {
+            echo "nome=$(node -p "require('./package.json').name")"
+            echo "versao=$(node -p "require('./package.json').version")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verificar se a versão já existe no npm
+        id: existe
+        env:
+          NOME: ${{ steps.pkg.outputs.nome }}
+          VERSAO: ${{ steps.pkg.outputs.versao }}
+        run: |
+          # `npm view` sai 1 tanto quando o pacote não existe quanto quando a
+          # versão não existe. Os dois casos significam "pode publicar".
+          if npm view "$NOME@$VERSAO" version > /dev/null 2>&1; then
+            echo "valor=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::$NOME@$VERSAO já está publicado; a publicação será pulada"
+          else
+            echo "valor=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publicar
+        if: steps.existe.outputs.valor == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ github.event.inputs.tag || 'latest' }}
+        run: npm publish --tag "$DIST_TAG" --provenance --access public
+
+      - name: Anexar o tarball na release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOME: ${{ steps.pkg.outputs.nome }}
+          VERSAO: ${{ steps.pkg.outputs.versao }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # O nome tem escopo (@iagogfe/ssh-mcp); a barra não pode ir para o
+          # nome do arquivo.
+          arquivo="$(echo "$NOME" | tr '/' '-' | sed 's/^@//')-${VERSAO}.tar.gz"
+          tar -czf "$arquivo" build/
+          gh release upload "$TAG" "$arquivo" --repo "$REPO"
+
+      - name: Resumo
+        if: always()
+        env:
+          NOME: ${{ steps.pkg.outputs.nome }}
+          VERSAO: ${{ steps.pkg.outputs.versao }}
+          PULOU: ${{ steps.existe.outputs.valor }}
+        run: |
+          if [ "$PULOU" = "true" ]; then
+            echo "Publicação pulada: $NOME@$VERSAO já existe." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Publicado: https://www.npmjs.com/package/$NOME/v/$VERSAO" >> "$GITHUB_STEP_SUMMARY"
+          fi

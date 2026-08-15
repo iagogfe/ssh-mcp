@@ -4,6 +4,7 @@
 [![Node Version](https://img.shields.io/node/v/@iagogfe/ssh-mcp)](https://nodejs.org/)
 [![License](https://img.shields.io/github/license/iagogfe/ssh-mcp)](./LICENSE)
 [![CI](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml)
+[![Security](https://github.com/iagogfe/ssh-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/iagogfe/ssh-mcp/actions/workflows/security.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
 **SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH.

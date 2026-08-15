@@ -1,0 +1,46 @@
+# Dependabot, e não Renovate como nos repositórios privados: o renovate.json
+# daqueles estende `github>iagogfe/workflows`, um preset privado, que um
+# repositório público não consegue ler. O Dependabot é nativo, não exige app
+# instalado, e sabe atualizar SHA pinado de action junto com o comentário da
+# versão ao lado — que é exatamente como as actions estão fixadas aqui.
+#
+# O `cooldown` repete em cada ecossistema de propósito: é por entrada, não
+# global. Ele segura uma versão recém-publicada antes de propô-la, porque
+# pacote malicioso costuma ser despublicado em horas — sem a carência, o bot
+# abriria o PR com a versão comprometida antes de alguém notar.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      # Um PR por grupo em vez de um por pacote: em repositório pessoal a
+      # revisão é o gargalo, não a quantidade de atualização disponível.
+      producao:
+        dependency-type: production
+      desenvolvimento:
+        dependency-type: development
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
