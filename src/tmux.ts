@@ -79,8 +79,12 @@ export function buildRunScript(opts: RunScriptOptions): string {
       ? `sudo -n sh '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
       : `. '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`;
 
+  // The timestamp write must be atomic: a poll landing between create and
+  // write of a direct `>` redirect would see an existing-but-empty start
+  // file. Writing to a temp name and renaming into place means start.$T is
+  // never observable half-written (rename() is atomic within a directory).
   const payload = detach
-    ? `date +%s > '$D/start.$T'; { ${body}; } &`
+    ? `date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'; { ${body}; } &`
     : body;
 
   const lines = [
@@ -206,7 +210,14 @@ export function buildJobStatusScript(opts: { session: string; token: string }): 
     '  cat "$D/err.$T" >&2',
     '  rm -f "$D/cmd.$T" "$D/out.$T" "$D/err.$T" "$D/rc.$T" "$D/start.$T"',
     'else',
-    `  printf '${JOB_MARKER} running %s\\n' "$(( $(date +%s) - $(cat "$D/start.$T") ))"`,
+    // Defense in depth alongside the atomic write in buildRunScript: even if
+    // start.$T were ever read empty or non-numeric, this must degrade to
+    // "running 0s" rather than crash on arithmetic and skip the marker
+    // entirely (`|| true` also keeps `set -e` from aborting on a cat that
+    // fails to find the file at all).
+    '  S=$(cat "$D/start.$T" 2>/dev/null || true)',
+    `  case "$S" in ''|*[!0-9]*) E=0 ;; *) E=$(( $(date +%s) - S )) ;; esac`,
+    `  printf '${JOB_MARKER} running %s\\n' "$E"`,
     '  tail -c 2000 "$D/out.$T" 2>/dev/null || true',
     '  tail -c 2000 "$D/err.$T" >&2 2>/dev/null || true',
     'fi',

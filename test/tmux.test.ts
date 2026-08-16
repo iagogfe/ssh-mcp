@@ -102,8 +102,17 @@ describe('buildRunScript', () => {
 
   it('detach backgrounds the subshell and records a start time', () => {
     const s = buildRunScript({ ...base, detach: true });
-    expect(s).toContain("date +%s > '$D/start.$T'");
+    expect(s).toContain("date +%s > '$D/start.$T.tmp'");
     expect(s).toContain('; } &');
+  });
+
+  it('writes the start timestamp atomically via a temp file and rename, never a direct redirect', () => {
+    const s = buildRunScript({ ...base, detach: true });
+    expect(s).toContain("date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'");
+    // A bare `>` redirect straight onto start.$T is exactly the non-atomic
+    // write this guards against: it would let a poll observe the file after
+    // creation but before `date` has written into it.
+    expect(s).not.toMatch(/date \+%s > '\$D\/start\.\$T';/);
   });
 
   it('detach omits the collect block so it returns immediately', () => {
@@ -224,6 +233,16 @@ describe('buildJobStatusScript', () => {
     expect(s).toContain(`printf 'SSH_MCP_JOB running`);
     expect(s).toContain('tail -c 2000 "$D/out.$T"');
     expect(s).toContain('tail -c 2000 "$D/err.$T"');
+  });
+
+  it('guards the elapsed-time arithmetic instead of evaluating it directly on unguarded cat output', () => {
+    const s = buildJobStatusScript(base);
+    expect(s).toContain('S=$(cat "$D/start.$T" 2>/dev/null || true)');
+    expect(s).toContain("case \"$S\" in ''|*[!0-9]*) E=0 ;;");
+    // The bug this guards against: arithmetic reading straight from a `cat`
+    // that could be empty (a transiently-empty start file) blows up under
+    // `set -eu` before the marker is ever printed.
+    expect(s).not.toMatch(/\$\(\(\s*\$\(date \+%s\)\s*-\s*\$\(cat "\$D\/start\.\$T"\)\s*\)\)/);
   });
 
   it('reaps the job files only once done', () => {
