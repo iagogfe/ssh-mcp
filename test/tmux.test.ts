@@ -54,6 +54,11 @@ describe('buildRunScript', () => {
     expect(s).toContain('exit 78');
   });
 
+  it('guards the workdir before persisting it, so a bad path is never recovered from a later call', () => {
+    const s = buildRunScript(base);
+    expect(s.indexOf('exit 78')).toBeLessThan(s.indexOf('tmux set-environment -t ssh-mcp SSH_MCP_DIR'));
+  });
+
   it('prunes stale files', () => {
     expect(buildRunScript(base)).toContain("find \"$D\" -type f -mtime +7 -delete");
   });

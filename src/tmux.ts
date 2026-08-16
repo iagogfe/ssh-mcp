@@ -52,11 +52,17 @@ function preamble(session: string): string {
     `D=$(tmux show-environment -t ${session} SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')`,
     'if [ -z "$D" ] || [ ! -d "$D" ]; then',
     '  D=$(mktemp -d "${TMPDIR:-/tmp}/ssh-mcp.XXXXXXXX")',
+    // $D is interpolated into a single-quoted context in the send-keys payload
+    // below; a literal quote in TMPDIR would break out of it, which is why this
+    // guard exists. Spaces and double quotes are rejected too out of caution,
+    // though single quotes actually preserve them literally with no break.
+    // The guard runs here, before set-environment, so a bad path is discarded
+    // before it can be persisted: once nothing bad can ever be stored, any path
+    // recovered later from show-environment is one that already passed this
+    // check, and no second guard is needed outside the `if`.
+    '  case "$D" in *[\\\'\\"\\ ]*) echo "ssh-mcp: unsafe workdir path: $D" >&2; exit 78;; esac',
     `  tmux set-environment -t ${session} SSH_MCP_DIR "$D"`,
     'fi',
-    // $D is interpolated into a single-quoted context in the send-keys payload
-    // below. A quote or space in TMPDIR would break out of it, so refuse instead.
-    'case "$D" in *[\\\'\\"\\ ]*) echo "ssh-mcp: unsafe workdir path: $D" >&2; exit 78;; esac',
     'find "$D" -type f -mtime +7 -delete 2>/dev/null || true',
   ].join('\n');
 }
