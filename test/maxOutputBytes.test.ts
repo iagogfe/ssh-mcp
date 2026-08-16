@@ -3,15 +3,29 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 
 const testServerPath = join(process.cwd(), 'build', 'index.js');
+const clientMapPath = join(process.cwd(), 'test', 'fixtures', 'client-map.md');
 
 function callExec(command: string, extraArgs: string[] = []): Promise<any> {
-  const args = [testServerPath, '--host=127.0.0.1', '--insecureHostKey', '--port=2222',
-    '--user=test', '--password=secret', '--timeout=20000', ...extraArgs];
+  const args = [testServerPath, '--insecureHostKey', '--port=2222', '--timeout=20000', ...extraArgs];
   return new Promise((resolve, reject) => {
-    const child = spawn('node', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, SSH_MCP_TEST: '1' } });
+    const child = spawn('node', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        SSH_MCP_TEST: '1',
+        SSH_MCP_CLIENT_MAP: clientMapPath,
+        SSH_MCP_USER: 'test',
+        SSH_MCP_PASSWORD: 'secret',
+      },
+    });
     let buf = '';
     const init = { jsonrpc: '2.0', id: 0, method: 'initialize', params: { capabilities: {}, clientInfo: { name: 't', version: '1' }, protocolVersion: '0.1.0' } };
-    const call = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'exec', arguments: { command } } };
+    const call = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'exec', arguments: { client: 'Test Client One', command } },
+    };
     const to = setTimeout(() => { child.kill(); reject(new Error('timeout')); }, 22000);
     child.stdout.on('data', (d) => {
       buf += d.toString(); const lines = buf.split('\n'); buf = lines.pop() || '';

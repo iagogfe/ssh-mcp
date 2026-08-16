@@ -1,227 +1,139 @@
-import { describe, it, expect } from 'vitest';
-import { spawn } from 'child_process';
-import { join } from 'path';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const testServerPath = join(process.cwd(), 'build', 'index.js');
+const clientMapPath = join(process.cwd(), 'test', 'fixtures', 'client-map.md');
+
+interface JsonRpcResponse {
+  id: number;
+  result?: {
+    content?: Array<{ type: string; text?: string }>;
+    isError?: boolean;
+  };
+  error?: { code: number; message: string };
+}
+
+function responseText(response: JsonRpcResponse): string {
+  return response.error?.message
+    ?? response.result?.content?.map((item) => item.text ?? '').join('\n')
+    ?? '';
+}
+
+function callExec(command: string, extraArgs: string[] = []): Promise<JsonRpcResponse> {
+  return new Promise((resolve, reject) => {
+    const child: ChildProcessWithoutNullStreams = spawn(
+      'node',
+      [
+        testServerPath,
+        '--insecureHostKey',
+        '--port=2222',
+        '--timeout=1500',
+        ...extraArgs,
+      ],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          SSH_MCP_TEST: '1',
+          SSH_MCP_CLIENT_MAP: clientMapPath,
+          SSH_MCP_USER: 'test',
+          SSH_MCP_PASSWORD: 'test-only-password',
+        },
+      },
+    );
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      finish(new Error(`MCP response timeout. stderr: ${stderr}`));
+    }, 5000);
+
+    const finish = (error?: Error, response?: JsonRpcResponse) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.kill();
+      if (error) reject(error);
+      else resolve(response as JsonRpcResponse);
+    };
+
+    const initialize = {
+      jsonrpc: '2.0',
+      id: 0,
+      method: 'initialize',
+      params: {
+        capabilities: {},
+        clientInfo: { name: 'max-chars-test', version: '1' },
+        protocolVersion: '0.1.0',
+      },
+    };
+    const toolCall = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'exec',
+        arguments: { client: 'Test Client One', command },
+      },
+    };
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+      const lines = stdout.split('\n');
+      stdout = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const message = JSON.parse(line) as JsonRpcResponse;
+        if (message.id === 0) {
+          child.stdin.write(`${JSON.stringify(toolCall)}\n`);
+        } else if (message.id === 1) {
+          finish(undefined, message);
+        }
+      }
+    });
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    child.on('error', (error) => finish(error));
+    child.on('close', (code) => {
+      if (!settled) finish(new Error(`MCP exited before responding (${code}). stderr: ${stderr}`));
+    });
+
+    child.stdin.write(`${JSON.stringify(initialize)}\n`);
+  });
+}
 
 describe('maxChars CLI configuration', () => {
-  const testServerPath = join(process.cwd(), 'build', 'index.js');
-  
-  describe('default behavior (1000 chars)', () => {
-    it('should reject commands over 1000 characters by default', () => {
-      const longCommand = 'echo ' + 'x'.repeat(1000);
-      const args = [
-        '--host=127.0.0.1',
-        '--insecureHostKey',
-        '--user=test',
-        '--password=secret',
-        '--timeout=5000'
-      ];
-      
-      const child = spawn('node', [testServerPath, ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      
-      // Send a tool call with a long command
-      const toolCall = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'exec',
-          arguments: {
-            command: longCommand
-          }
-        }
-      };
-      
-      child.stdin.write(JSON.stringify(toolCall) + '\n');
-      
-      let output = '';
-      child.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      child.on('close', () => {
-        const response = JSON.parse(output);
-        expect(response.error.message).toContain('Command is too long (max 1000 characters)');
-      });
-      
-      child.stdin.end();
-    });
+  it('rejects commands over the default limit before connecting', async () => {
+    const response = await callExec(`echo ${'x'.repeat(1000)}`);
+    const text = responseText(response);
+
+    expect(text).toContain('Command is too long (max 1000 characters)');
+    expect(text).not.toContain('ECONNREFUSED');
   });
 
-  describe('custom maxChars limit', () => {
-    it('should respect custom positive limit', () => {
-      const longCommand = 'echo ' + 'x'.repeat(50);
-      const args = [
-        '--host=127.0.0.1',
-        '--insecureHostKey',
-        '--user=test',
-        '--password=secret',
-        '--timeout=5000',
-        '--maxChars=50'
-      ];
-      
-      const child = spawn('node', [testServerPath, ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      
-      const toolCall = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'exec',
-          arguments: {
-            command: longCommand
-          }
-        }
-      };
-      
-      child.stdin.write(JSON.stringify(toolCall) + '\n');
-      
-      let output = '';
-      child.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      child.on('close', () => {
-        const response = JSON.parse(output);
-        expect(response.error.message).toContain('Command is too long (max 50 characters)');
-      });
-      
-      child.stdin.end();
-    });
+  it('respects a custom positive limit before connecting', async () => {
+    const response = await callExec(`echo ${'x'.repeat(50)}`, ['--maxChars=50']);
+    const text = responseText(response);
+
+    expect(text).toContain('Command is too long (max 50 characters)');
+    expect(text).not.toContain('ECONNREFUSED');
   });
 
-  describe('no-limit mode', () => {
-    it('should allow unlimited characters with maxChars=none', () => {
-      const veryLongCommand = 'echo ' + 'x'.repeat(10000);
-      const args = [
-        '--host=127.0.0.1',
-        '--insecureHostKey',
-        '--user=test',
-        '--password=secret',
-        '--timeout=5000',
-        '--maxChars=none'
-      ];
-      
-      const child = spawn('node', [testServerPath, ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      
-      const toolCall = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'exec',
-          arguments: {
-            command: veryLongCommand
-          }
-        }
-      };
-      
-      child.stdin.write(JSON.stringify(toolCall) + '\n');
-      
-      let output = '';
-      child.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      child.on('close', () => {
-        const response = JSON.parse(output);
-        // Should not have a length error - might have SSH connection error instead
-        expect(response.error.message).not.toContain('Command is too long');
-      });
-      
-      child.stdin.end();
-    });
+  it.each(['none', '0'])(
+    'does not reject a long command by length when maxChars=%s',
+    async (limit) => {
+      const response = await callExec(`echo ${'x'.repeat(10000)}`, [`--maxChars=${limit}`]);
 
-    it('should allow unlimited characters with maxChars=0', () => {
-      const veryLongCommand = 'echo ' + 'x'.repeat(10000);
-      const args = [
-        '--host=127.0.0.1',
-        '--insecureHostKey',
-        '--user=test',
-        '--password=secret',
-        '--timeout=5000',
-        '--maxChars=0'
-      ];
-      
-      const child = spawn('node', [testServerPath, ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      
-      const toolCall = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'exec',
-          arguments: {
-            command: veryLongCommand
-          }
-        }
-      };
-      
-      child.stdin.write(JSON.stringify(toolCall) + '\n');
-      
-      let output = '';
-      child.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      child.on('close', () => {
-        const response = JSON.parse(output);
-        // Should not have a length error - might have SSH connection error instead
-        expect(response.error.message).not.toContain('Command is too long');
-      });
-      
-      child.stdin.end();
-    });
-  });
+      expect(responseText(response)).not.toContain('Command is too long');
+    },
+  );
 
-  describe('invalid maxChars values', () => {
-    it('should fall back to default for invalid string values', () => {
-      const longCommand = 'echo ' + 'x'.repeat(1000);
-      const args = [
-        '--host=127.0.0.1',
-        '--insecureHostKey',
-        '--user=test',
-        '--password=secret',
-        '--timeout=5000',
-        '--maxChars=invalid'
-      ];
-      
-      const child = spawn('node', [testServerPath, ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      
-      const toolCall = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'exec',
-          arguments: {
-            command: longCommand
-          }
-        }
-      };
-      
-      child.stdin.write(JSON.stringify(toolCall) + '\n');
-      
-      let output = '';
-      child.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      child.on('close', () => {
-        const response = JSON.parse(output);
-        expect(response.error.message).toContain('Command is too long (max 1000 characters)');
-      });
-      
-      child.stdin.end();
-    });
+  it('falls back to the default limit for an invalid value', async () => {
+    const response = await callExec(`echo ${'x'.repeat(1000)}`, ['--maxChars=invalid']);
+
+    expect(responseText(response)).toContain('Command is too long (max 1000 characters)');
   });
 });
