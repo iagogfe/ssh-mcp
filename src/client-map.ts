@@ -30,7 +30,6 @@ export function normalizeClientName(value: string): string {
 const clientHeading = /^###\s+(.+?)\s*$/;
 const anyHeading = /^#{1,6}\s+/;
 const hostPattern = /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b/gi;
-const planetfoneDomain = '.planetarium.com.br';
 
 export function parsePlanetfone4Hosts(markdown: string): PlanetfoneClient[] {
   const clients: PlanetfoneClient[] = [];
@@ -65,8 +64,12 @@ export function parsePlanetfone4Hosts(markdown: string): PlanetfoneClient[] {
     for (const segment of code) {
       const hosts = segment.slice(1, -1).match(hostPattern) ?? [];
       for (const candidate of hosts) {
+        // Any host is accepted. This used to be filtered to a single hardcoded
+        // domain suffix, which silently dropped every entry outside it and made
+        // the inventory unusable for anyone else — including the test fixture,
+        // which has to point at the local SSH endpoint.
         const host = candidate.toLowerCase();
-        if (host.endsWith(planetfoneDomain) && !current.hosts.includes(host)) {
+        if (!current.hosts.includes(host)) {
           current.hosts.push(host);
         }
       }

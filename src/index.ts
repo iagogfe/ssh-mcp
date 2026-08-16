@@ -10,7 +10,6 @@ import { homedir } from 'os';
 import { join } from 'path';
 import {
   loadPlanetfone4Hosts,
-  type ClientResolution,
   type PlanetfoneClient,
 } from './client-map.js';
 import { resolveClientForProtocol } from './client-protocol.js';
@@ -66,7 +65,14 @@ export function shouldLoadPrivateKey(
 }
 
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : (process.env.SSH_MCP_PORT ? parseInt(process.env.SSH_MCP_PORT) : 22);
-export const CLIENT_MAP_PATH = process.env.SSH_MCP_CLIENT_MAP ?? './config/client-map.md';
+// Single-host mode: the server is pinned to one target for its whole lifetime.
+// This is the original contract and stays the default, so existing deployments
+// that pass --host keep working without knowing an inventory exists.
+export const HOST = argvConfig.host ?? process.env.SSH_MCP_HOST;
+// Inventory mode: opt-in only. No default path — a relative default would
+// resolve against whatever working directory the MCP client happened to spawn
+// the process in, which the operator does not control.
+export const CLIENT_MAP_PATH = argvConfig.clientMap ?? process.env.SSH_MCP_CLIENT_MAP;
 export const USER = argvConfig.user ?? process.env.SSH_MCP_USER;
 export const PASSWORD = resolveCredential(
   argvConfig.password,
@@ -122,6 +128,14 @@ function resolveMaxBytes(callMax: number | undefined): number {
 function validateConfig(config: Record<string, string | null>) {
   const errors = [];
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
+  // One of the two modes has to be configured, otherwise every tool call would
+  // fail at runtime with no target. Failing at startup names the problem while
+  // the operator is still looking at the config.
+  const hasHost = !!(config.host ?? process.env.SSH_MCP_HOST);
+  const hasClientMap = !!(config.clientMap ?? process.env.SSH_MCP_CLIENT_MAP);
+  if (!hasHost && !hasClientMap) {
+    errors.push('Missing target: pass --host for a single server, or --clientMap for an inventory');
+  }
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
   }
@@ -577,28 +591,48 @@ let configuredClients: PlanetfoneClient[] | null = null;
 const connectionManagers = new DestinationManagerCache<SSHConnectionManager>();
 
 function getConfiguredClients(): PlanetfoneClient[] {
+  if (!CLIENT_MAP_PATH) {
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
+      'No client inventory configured; start the server with --clientMap or omit the client parameter to use --host',
+    );
+  }
   if (!configuredClients) {
     configuredClients = loadPlanetfone4Hosts(CLIENT_MAP_PATH);
   }
   return configuredClients;
 }
 
+// Resolve the target for one tool call. A client name selects from the
+// inventory; its absence falls back to the pinned --host. Both modes can be
+// configured at once, in which case --host is the default target.
+function resolveTargetHost(client: string | undefined): string {
+  if (client !== undefined && client !== '') {
+    return resolveClientForProtocol(getConfiguredClients(), client).host;
+  }
+  if (HOST) return HOST;
+  throw new ProtocolError(
+    ProtocolErrorCode.InvalidParams,
+    'No target: this server has no --host configured, so a client name is required',
+  );
+}
+
 async function getConnectionManager(
-  client: string,
+  client: string | undefined,
   includeSudo: boolean,
-): Promise<{ manager: SSHConnectionManager; resolution: ClientResolution }> {
-  const resolution = resolveClientForProtocol(getConfiguredClients(), client);
+): Promise<{ manager: SSHConnectionManager }> {
+  const host = resolveTargetHost(client);
   if (!USER) {
     throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required username');
   }
 
   const manager = await connectionManagers.getOrCreateAsync(
-    resolution.host,
+    host,
     PORT,
     USER,
     async () => {
       const sshConfig: SSHConfig = {
-        host: resolution.host,
+        host,
         port: PORT,
         username: USER,
         hostFingerprint: HOST_FINGERPRINT,
@@ -624,7 +658,7 @@ async function getConnectionManager(
     },
   );
 
-  return { manager, resolution };
+  return { manager };
 }
 
 function closeAllConnectionManagers(): void {
@@ -645,7 +679,7 @@ const server = new McpServer(
 );
 
 server.registerTool("exec", { description: "Execute a shell command on the remote SSH server and return the output.", inputSchema: z.object({
-        client: z.string().describe('Planetfone client name from the configured inventory'),
+        client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
         command: z.string().describe("Shell command to execute on the remote SSH server"),
         description: z.string().optional().describe("Optional description of what this command will do"),
         maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
@@ -690,7 +724,7 @@ server.registerTool("exec", { description: "Execute a shell command on the remot
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
   server.registerTool("sudo-exec", { description: "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.", inputSchema: z.object({
-              client: z.string().describe('Planetfone client name from the configured inventory'),
+              client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
               command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
               description: z.string().optional().describe("Optional description of what this command will do"),
               maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),

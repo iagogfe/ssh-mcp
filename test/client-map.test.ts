@@ -7,21 +7,21 @@ import {
 
 const markdown = `# Hosts únicos
 
-- \`fixture-client-007.planetarium.com.br\`
+- \`fixture-client-007.example.com\`
 
 ### Example Client
 
 - Wiki: [Example Client](http://wiki.example/Example Client)
-- \`fixture-client-004.planetarium.com.br\`
-- \`fixture-client-005.planetarium.com.br\`
-- \`fixture-client-004.planetarium.com.br\`
+- \`fixture-client-004.example.com\`
+- \`fixture-client-005.example.com\`
+- \`fixture-client-004.example.com\`
 Texto que não é um host.
 - \`192.0.2.10\`
 
 ### Example Client B
 
-- Acesso: \`fixture-client-006.planetarium.com.br\`
-- \`fixture-client-006.planetarium.com.br\`
+- Acesso: \`fixture-client-006.example.com\`
+- \`fixture-client-006.example.com\`
 
 ### Sem acesso
 
@@ -37,13 +37,22 @@ describe('Planetfone client inventory', () => {
     expect(normalizeClientName('  EXAMPLE   client  ')).toBe('example client');
   });
 
-  it('parses client sections while ignoring global hosts, prose, links, IPs, and empty sections', () => {
+  // Prose and markdown links are excluded because only backticked spans are
+  // read, not because of any domain rule. IPs and hosts on other domains are
+  // now kept: they were previously dropped by a hardcoded single-domain suffix
+  // check, which made the parser unusable for any other deployment.
+  it('parses client sections while ignoring global hosts, prose, links, and empty sections', () => {
     expect(parsePlanetfone4Hosts(markdown)).toEqual([
       {
         name: 'Example Client',
-        hosts: ['fixture-client-004.planetarium.com.br', 'fixture-client-005.planetarium.com.br'],
+        hosts: [
+          'fixture-client-004.example.com',
+          'fixture-client-005.example.com',
+          '192.0.2.10',
+        ],
       },
-      { name: 'Example Client B', hosts: ['fixture-client-006.planetarium.com.br'] },
+      { name: 'Example Client B', hosts: ['fixture-client-006.example.com'] },
+      { name: 'Domínio externo', hosts: ['ssh.example.net'] },
     ]);
   });
 
@@ -52,15 +61,19 @@ describe('Planetfone client inventory', () => {
 
     expect(resolveClientHost(clients, 'Example Client')).toEqual({
       clientName: 'Example Client',
-      host: 'fixture-client-004.planetarium.com.br',
-      hosts: ['fixture-client-004.planetarium.com.br', 'fixture-client-005.planetarium.com.br'],
+      host: 'fixture-client-004.example.com',
+      hosts: [
+        'fixture-client-004.example.com',
+        'fixture-client-005.example.com',
+        '192.0.2.10',
+      ],
     });
   });
 
   it('rejects ambiguous client names after normalization', () => {
     const clients = [
-      { name: 'Example Client B', hosts: ['fixture-client-006.planetarium.com.br'] },
-      { name: 'Example Client B', hosts: ['fixture-client-008.planetarium.com.br'] },
+      { name: 'Example Client B', hosts: ['fixture-client-006.example.com'] },
+      { name: 'Example Client B', hosts: ['fixture-client-008.example.com'] },
     ];
 
     expect(() => resolveClientHost(clients, 'Example Client B')).toThrowError(
@@ -70,10 +83,10 @@ describe('Planetfone client inventory', () => {
 
   it('reports a missing client with at most three nearby names and no secrets', () => {
     const clients = [
-      { name: 'Example Client Example Client Parts', hosts: ['fixture-client-009.planetarium.com.br'] },
-      { name: 'Example Client Example Client Used', hosts: ['fixture-client-010.planetarium.com.br'] },
-      { name: 'Example Client Services', hosts: ['fixture-client-011.planetarium.com.br'] },
-      { name: 'Example Client B', hosts: ['fixture-client-006.planetarium.com.br'] },
+      { name: 'Example Client Example Client Parts', hosts: ['fixture-client-009.example.com'] },
+      { name: 'Example Client Example Client Used', hosts: ['fixture-client-010.example.com'] },
+      { name: 'Example Client Services', hosts: ['fixture-client-011.example.com'] },
+      { name: 'Example Client B', hosts: ['fixture-client-006.example.com'] },
     ];
 
     let suggestionMessage = '';

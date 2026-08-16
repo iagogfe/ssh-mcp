@@ -44,7 +44,7 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
 
 - `exec`: Execute a shell command on the remote server
   - **Parameters:**
-    - `client` (required): Planetfone client name from the configured inventory
+    - `client` (optional): Client name from the configured inventory. Omit it when the server is pinned to a single host with `--host`.
     - `command` (required): Shell command to execute on the remote SSH server
     - `description` (optional): Optional description of what this command will do (appended as a comment)
     - `maxBytes` (optional): Truncate output to this many bytes. Defaults to the global `--maxOutputBytes` setting. Pass `0` to get full output.
@@ -53,7 +53,7 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
-    - `client` (required): Planetfone client name from the configured inventory
+    - `client` (optional): Client name from the configured inventory. Omit it when the server is pinned to a single host with `--host`.
     - `command` (required): Shell command to execute as root using sudo
     - `description` (optional): Optional description of what this command will do (appended as a comment)
     - `maxBytes` (optional): Truncate output to this many bytes. Defaults to the global `--maxOutputBytes` setting. Pass `0` to get full output.
@@ -95,7 +95,13 @@ npm run build
 
 You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use this MCP Server.
 
-The `exec` and `sudo-exec` tools require both `client` and `command`. The server resolves `client` in the configured Planetfone 4 inventory and selects the first host listed for that client. Matching ignores case, accents, and extra spaces.
+The server runs in one of two modes, and both can be configured at once.
+
+**Single-host mode** (the default) pins the server to one target with `--host` / `SSH_MCP_HOST`. Tools take only `command`; there is no `client` parameter to pass.
+
+**Inventory mode** is opt-in with `--clientMap` / `SSH_MCP_CLIENT_MAP`, pointing at a Markdown inventory. Tools then accept a `client` name, which the server resolves to the first host listed for that client. Matching ignores case, accents, and extra spaces.
+
+With both configured, `--host` is the default target and `client` switches away from it. `--clientMap` has no default path: a relative default would resolve against whatever working directory the MCP client happened to spawn the process in.
 
 **Planetfone environment:**
 
@@ -105,7 +111,7 @@ SSH_MCP_PASSWORD=<SSH password>
 SSH_MCP_CLIENT_MAP=./config/client-map.md
 ```
 
-`SSH_MCP_CLIENT_MAP` defaults to `./config/client-map.md` when the global wrapper is used. Keep `SSH_MCP_USER` and `SSH_MCP_PASSWORD` only in the MCP process environment; do not place them in command-line arguments, MCP configuration files, Markdown inventories, or logs.
+`SSH_MCP_CLIENT_MAP` has no default; without it the server stays in single-host mode. Keep `SSH_MCP_USER` and `SSH_MCP_PASSWORD` only in the MCP process environment; do not place them in command-line arguments, MCP configuration files, Markdown inventories, or logs.
 
 **Optional Parameters:**
 - `port`: SSH port (default: 22)
@@ -131,9 +137,9 @@ To keep credentials out of the process list (`ps`) and out of committed MCP clie
 
 | Variable | Equivalent flag |
 |---|---|
-| `SSH_MCP_USER` | SSH username used for the resolved client host |
-| `SSH_MCP_PASSWORD` | SSH password used for the resolved client host |
-| `SSH_MCP_CLIENT_MAP` | Path to the Planetfone client/host inventory |
+| `SSH_MCP_USER` | SSH username used for the resolved host |
+| `SSH_MCP_PASSWORD` | SSH password used for the resolved host |
+| `SSH_MCP_CLIENT_MAP` | Path to the client/host inventory (enables inventory mode) |
 | `SSH_MCP_PORT` | `--port` |
 | `SSH_MCP_PASSWORD` | `--password` (legacy/general configuration) |
 | `SSH_MCP_KEY_PATH` | `--key` |
@@ -302,5 +308,5 @@ This fork adds:
 
 - Migration to the MCP TypeScript SDK v2 and the [2026-07-28 protocol revision](https://modelcontextprotocol.io/specification/2026-07-28)
 - Host key verification enabled by default, with `--hostFingerprint` / `--knownHosts` / `--insecureHostKey`
-- Planetfone client routing through `client-map.md`, with `SSH_MCP_USER`/`SSH_MCP_PASSWORD` credentials from the process environment
+- Optional inventory-based routing through `--clientMap`, with `SSH_MCP_USER`/`SSH_MCP_PASSWORD` credentials from the process environment
 - Exit-code-aware tool results and head+tail output truncation (`--maxOutputBytes` / `maxBytes`)

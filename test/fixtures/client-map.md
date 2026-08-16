@@ -1,7 +1,7 @@
 ### Test Client One
 
-- `fixture-client-001.planetarium.com.br`
+- `127.0.0.1`
 
 ### Test Client Two
 
-- `fixture-client-002.planetarium.com.br`
+- `127.0.0.1`
