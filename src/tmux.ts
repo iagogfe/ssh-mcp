@@ -110,3 +110,65 @@ export function buildInterruptScript(session: string): string {
   assertSessionName(session);
   return `tmux send-keys -t ${session} C-c 2>/dev/null || true\n`;
 }
+
+export interface TmuxProbe {
+  tmux: string | null;  // version string, e.g. "tmux 3.4"
+  pm: string | null;    // detected package manager, only when tmux is missing
+}
+
+// Runs over the plain conn.exec() channel — the path that already exists — so
+// the probe never depends on the feature it is probing for. The package manager
+// is detected in the same round trip to keep the failure message copy-pasteable.
+export function buildProbeScript(): string {
+  return [
+    'if command -v tmux >/dev/null 2>&1; then',
+    `  printf 'tmux=%s\\n' "$(tmux -V)"`,
+    'else',
+    `  printf 'tmux=\\n'`,
+    '  for m in apt-get apk dnf yum pacman zypper; do',
+    `    command -v "$m" >/dev/null 2>&1 && { printf 'pm=%s\\n' "$m"; break; }`,
+    '  done',
+    'fi',
+    '',
+  ].join('\n');
+}
+
+export function parseProbeOutput(stdout: string): TmuxProbe {
+  let tmux: string | null = null;
+  let pm: string | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith('tmux=')) {
+      const v = line.slice('tmux='.length).trim();
+      tmux = v.length > 0 ? v : null;
+    } else if (line.startsWith('pm=')) {
+      const v = line.slice('pm='.length).trim();
+      pm = v.length > 0 ? v : null;
+    }
+  }
+  return { tmux, pm };
+}
+
+const PM_COMMANDS: Record<string, string> = {
+  'apt-get': 'sudo apt-get install -y tmux',
+  dnf: 'sudo dnf install -y tmux',
+  yum: 'sudo yum install -y tmux',
+  zypper: 'sudo zypper install -y tmux',
+  apk: 'sudo apk add tmux',
+  pacman: 'sudo pacman -S --noconfirm tmux',
+};
+
+export function installHint(pm: string | null, host: string): string {
+  const lines = [
+    `tmux não encontrado em ${host}.`,
+    'Sessão persistente (cd/export entre comandos) precisa de tmux no host remoto.',
+    '',
+  ];
+  const cmd = pm ? PM_COMMANDS[pm] : undefined;
+  if (cmd) {
+    lines.push(`  ${cmd}`, '');
+  } else {
+    lines.push('  Instale tmux pelo gerenciador de pacotes do host.', '');
+  }
+  lines.push('Ou rode sem estado (comportamento antigo, sem cd/export persistentes): --noTmux');
+  return lines.join('\n');
+}

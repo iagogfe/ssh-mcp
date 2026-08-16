@@ -5,6 +5,9 @@ import {
   buildRunScript,
   buildInterruptScript,
   DEFAULT_TMUX_SESSION,
+  buildProbeScript,
+  parseProbeOutput,
+  installHint,
 } from '../src/tmux';
 
 describe('assertSessionName', () => {
@@ -126,5 +129,61 @@ describe('buildInterruptScript', () => {
 
   it('validates the session name', () => {
     expect(() => buildInterruptScript('a b')).toThrow();
+  });
+});
+
+describe('buildProbeScript', () => {
+  it('checks tmux and falls back to detecting a package manager', () => {
+    const s = buildProbeScript();
+    expect(s).toContain('command -v tmux');
+    for (const pm of ['apt-get', 'apk', 'dnf', 'yum', 'pacman', 'zypper']) {
+      expect(s).toContain(pm);
+    }
+  });
+});
+
+describe('parseProbeOutput', () => {
+  it('reads the tmux version when present', () => {
+    expect(parseProbeOutput('tmux=tmux 3.4\n')).toEqual({ tmux: 'tmux 3.4', pm: null });
+  });
+
+  it('reads the package manager when tmux is missing', () => {
+    expect(parseProbeOutput('tmux=\npm=apt-get\n')).toEqual({ tmux: null, pm: 'apt-get' });
+  });
+
+  it('treats a missing tmux with no package manager as both null', () => {
+    expect(parseProbeOutput('tmux=\n')).toEqual({ tmux: null, pm: null });
+  });
+
+  it('ignores unrelated noise on the channel', () => {
+    expect(parseProbeOutput('motd banner\ntmux=tmux 2.8\n')).toEqual({ tmux: 'tmux 2.8', pm: null });
+  });
+
+  it('treats empty output as tmux absent', () => {
+    expect(parseProbeOutput('')).toEqual({ tmux: null, pm: null });
+  });
+});
+
+describe('installHint', () => {
+  it('names the host and the exact command', () => {
+    const msg = installHint('apt-get', 'db01.example.com');
+    expect(msg).toContain('db01.example.com');
+    expect(msg).toContain('sudo apt-get install -y tmux');
+    expect(msg).toContain('--noTmux');
+  });
+
+  it('uses each package manager idiom', () => {
+    expect(installHint('apk', 'h')).toContain('sudo apk add tmux');
+    expect(installHint('pacman', 'h')).toContain('sudo pacman -S --noconfirm tmux');
+    expect(installHint('dnf', 'h')).toContain('sudo dnf install -y tmux');
+    expect(installHint('yum', 'h')).toContain('sudo yum install -y tmux');
+    expect(installHint('zypper', 'h')).toContain('sudo zypper install -y tmux');
+  });
+
+  it('degrades without a command line when no package manager was found', () => {
+    const msg = installHint(null, 'h');
+    expect(msg).toContain('h');
+    expect(msg).not.toContain('install -y');
+    expect(msg).toContain('--noTmux');
   });
 });
