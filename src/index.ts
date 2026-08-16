@@ -15,6 +15,13 @@ import {
 import { resolveClientForProtocol } from './client-protocol.js';
 import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseMaxBytes } from './output.js';
+import {
+  DEFAULT_TMUX_SESSION,
+  buildProbeScript,
+  parseProbeOutput,
+  type TmuxMode,
+  type TmuxProbe,
+} from './tmux.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -304,6 +311,8 @@ export interface SSHConfig {
   hostFingerprint?: string;   // Pinned host key fingerprint (SHA256 or MD5)
   knownHostsPath?: string;    // Path to known_hosts (defaults to ~/.ssh/known_hosts)
   insecureHostKey?: boolean;  // Disable host key verification (vulnerable to MITM)
+  noTmux?: boolean;           // Force the stateless per-command exec path
+  tmuxSession?: string;       // tmux session name (defaults to 'ssh-mcp')
 }
 
 // Build the ssh2 connect config, injecting a hostVerifier so we never silently
@@ -345,6 +354,8 @@ export class SSHConnectionManager {
   private suPromise: Promise<void> | null = null;
   private isElevated = false;  // Track if we're in su mode
   private tokenSeq = 0;        // Monotonic counter for unique command sentinels
+  private tmuxMode: TmuxMode | null = null;
+  private probe: TmuxProbe | null = null;
 
   constructor(config: SSHConfig) {
     this.sshConfig = config;
@@ -354,6 +365,40 @@ export class SSHConnectionManager {
   nextToken(): string {
     this.tokenSeq += 1;
     return 'k' + this.tokenSeq.toString(36) + 'z';
+  }
+
+  getTmuxSession(): string {
+    return this.sshConfig.tmuxSession || DEFAULT_TMUX_SESSION;
+  }
+
+  getProbe(): TmuxProbe | null {
+    return this.probe;
+  }
+
+  // Cleared whenever the connection drops so a reconnect re-evaluates the host.
+  resetMode(): void {
+    this.tmuxMode = null;
+    this.probe = null;
+  }
+
+  // Resolved once per connection. Precedence is fixed: su elevation owns the
+  // shell, so tmux cannot also own it; an explicit --noTmux beats a probe; and
+  // only then does the host get asked whether tmux exists.
+  //
+  // runProbe is injected rather than called directly so this stays testable
+  // without an SSH server, and so src/tmux.ts can remain free of I/O.
+  async resolveMode(runProbe: (script: string) => Promise<string>): Promise<TmuxMode> {
+    if (this.tmuxMode) return this.tmuxMode;
+
+    if (this.sshConfig.suPassword) {
+      this.tmuxMode = 'su';
+    } else if (this.sshConfig.noTmux) {
+      this.tmuxMode = 'stateless';
+    } else {
+      this.probe = parseProbeOutput(await runProbe(buildProbeScript()));
+      this.tmuxMode = this.probe.tmux ? 'tmux' : 'blocked';
+    }
+    return this.tmuxMode;
   }
 
   async connect(): Promise<void> {
@@ -374,6 +419,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.resetMode();
         reject(new ProtocolError(ProtocolErrorCode.InternalError, 'SSH connection timeout'));
       }, 30000); // 30 seconds connection timeout
 
@@ -402,6 +448,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.resetMode();
         reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
       });
 
@@ -410,6 +457,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.resetMode();
       });
 
       this.conn.on('close', () => {
@@ -417,6 +465,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.resetMode();
       });
 
       this.conn.connect(buildConnectConfig(this.sshConfig));
@@ -584,6 +633,7 @@ export class SSHConnectionManager {
       this.conn.end();
       this.conn = null;
     }
+    this.resetMode();
   }
 }
 
