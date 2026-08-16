@@ -121,7 +121,7 @@ export interface TmuxProbe {
 // is detected in the same round trip to keep the failure message copy-pasteable.
 export function buildProbeScript(): string {
   return [
-    '',
+    `printf '\\n'`,
     'if command -v tmux >/dev/null 2>&1; then',
     `  printf 'tmux=%s\\n' "$(tmux -V)"`,
     'else',
