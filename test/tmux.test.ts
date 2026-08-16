@@ -199,3 +199,82 @@ describe('installHint', () => {
     expect(msg).toContain('--noTmux');
   });
 });
+
+import { buildJobStatusScript, parseJobStatus, JOB_MARKER } from '../src/tmux';
+
+describe('buildJobStatusScript', () => {
+  const base = { session: 'ssh-mcp', token: 'k7z' };
+
+  it('fails on an unknown job instead of reporting it as running', () => {
+    const s = buildJobStatusScript(base);
+    expect(s).toContain('[ -e "$D/start.$T" ]');
+    expect(s).toContain('exit 78');
+  });
+
+  it('emits the done marker before any user output', () => {
+    const s = buildJobStatusScript(base);
+    const marker = s.indexOf(`printf 'SSH_MCP_JOB done`);
+    const out = s.indexOf('cat "$D/out.$T"');
+    expect(marker).toBeGreaterThan(-1);
+    expect(out).toBeGreaterThan(marker);
+  });
+
+  it('emits the running marker with elapsed seconds and partial output', () => {
+    const s = buildJobStatusScript(base);
+    expect(s).toContain(`printf 'SSH_MCP_JOB running`);
+    expect(s).toContain('tail -c 2000 "$D/out.$T"');
+    expect(s).toContain('tail -c 2000 "$D/err.$T"');
+  });
+
+  it('reaps the job files only once done', () => {
+    const s = buildJobStatusScript(base);
+    const rm = s.indexOf('rm -f');
+    const elseIdx = s.indexOf('else');
+    expect(rm).toBeGreaterThan(-1);
+    expect(rm).toBeLessThan(elseIdx);
+  });
+
+  it('always exits 0 so the user exit code cannot collide with the state', () => {
+    expect(buildJobStatusScript(base).trimEnd().endsWith('exit 0')).toBe(true);
+  });
+
+  it('validates its inputs', () => {
+    expect(() => buildJobStatusScript({ session: 'a;b', token: 'k7z' })).toThrow();
+    expect(() => buildJobStatusScript({ session: 'ssh-mcp', token: 'k 7' })).toThrow();
+  });
+});
+
+describe('parseJobStatus', () => {
+  it('parses a running job and strips the marker line', () => {
+    const r = parseJobStatus(`${JOB_MARKER} running 47\nbuilding step 3\n`, 'warn\n');
+    expect(r.state).toBe('running');
+    expect(r.elapsedSeconds).toBe(47);
+    expect(r.exitCode).toBeNull();
+    expect(r.stdout).toBe('building step 3\n');
+    expect(r.stderr).toBe('warn\n');
+  });
+
+  it('parses a finished job with its exit code', () => {
+    const r = parseJobStatus(`${JOB_MARKER} done 10\nall output\n`, 'boom\n');
+    expect(r.state).toBe('done');
+    expect(r.exitCode).toBe(10);
+    expect(r.elapsedSeconds).toBeNull();
+    expect(r.stdout).toBe('all output\n');
+  });
+
+  it('does not mistake user output that looks like the marker', () => {
+    const r = parseJobStatus(`${JOB_MARKER} running 5\n${JOB_MARKER} done 0\n`, '');
+    expect(r.state).toBe('running');
+    expect(r.stdout).toBe(`${JOB_MARKER} done 0\n`);
+  });
+
+  it('treats a missing marker as a protocol failure', () => {
+    expect(() => parseJobStatus('no marker here\n', '')).toThrow(/marker/i);
+  });
+
+  it('handles a job with no output yet', () => {
+    const r = parseJobStatus(`${JOB_MARKER} running 0\n`, '');
+    expect(r.state).toBe('running');
+    expect(r.stdout).toBe('');
+  });
+});
