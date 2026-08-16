@@ -3,12 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { resolveClientForProtocol } from '../src/client-protocol';
 
 const clients = [
-  { name: 'Local Example Client', hosts: ['fixture-client-012.planetarium.com.br'] },
+  { name: 'Local Example Client', hosts: ['fixture-client-012.example.com'] },
 ];
 
 const ambiguousClients = [
-  { name: 'Example Client B', hosts: ['fixture-client-013.planetarium.com.br'] },
-  { name: 'Example Client B', hosts: ['fixture-client-014.planetarium.com.br'] },
+  { name: 'Example Client B', hosts: ['fixture-client-013.example.com'] },
+  { name: 'Example Client B', hosts: ['fixture-client-014.example.com'] },
 ];
 
 describe('client resolution protocol errors', () => {
