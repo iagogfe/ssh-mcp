@@ -140,6 +140,12 @@ describe('buildProbeScript', () => {
       expect(s).toContain(pm);
     }
   });
+
+  it('emits a leading newline as its first executable statement', () => {
+    const s = buildProbeScript();
+    const lines = s.split('\n').filter(line => line.trim().length > 0);
+    expect(lines[0]).toBe("printf '\\n'");
+  });
 });
 
 describe('parseProbeOutput', () => {
@@ -159,8 +165,10 @@ describe('parseProbeOutput', () => {
     expect(parseProbeOutput('motd banner\ntmux=tmux 2.8\n')).toEqual({ tmux: 'tmux 2.8', pm: null });
   });
 
-  it('parses output when preamble is merged but script starts with newline', () => {
-    expect(parseProbeOutput('Warning: unsupported locale \ntmux=tmux 3.4\n')).toEqual({ tmux: 'tmux 3.4', pm: null });
+  it('reports tmux absent when the marker is glued to preamble, which the probe script\'s leading newline prevents', () => {
+    // This documents why the script-side fix is necessary: the parser cannot recover
+    // from glued input, so the script must ensure markers always start on a fresh line.
+    expect(parseProbeOutput('Warning: unsupported locale tmux=tmux 3.4\n')).toEqual({ tmux: null, pm: null });
   });
 
   it('treats empty output as tmux absent', () => {
