@@ -159,6 +159,10 @@ describe('parseProbeOutput', () => {
     expect(parseProbeOutput('motd banner\ntmux=tmux 2.8\n')).toEqual({ tmux: 'tmux 2.8', pm: null });
   });
 
+  it('parses output when preamble is merged but script starts with newline', () => {
+    expect(parseProbeOutput('Warning: unsupported locale \ntmux=tmux 3.4\n')).toEqual({ tmux: 'tmux 3.4', pm: null });
+  });
+
   it('treats empty output as tmux absent', () => {
     expect(parseProbeOutput('')).toEqual({ tmux: null, pm: null });
   });
