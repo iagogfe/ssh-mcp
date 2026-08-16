@@ -153,6 +153,11 @@ tmux has-session -t <session> 2>/dev/null || tmux new-session -d -s <session>
 D=$(tmux show-environment -t <session> SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')
 [ -n "$D" ] && [ -d "$D" ] || {
   D=$(mktemp -d "${TMPDIR:-/tmp}/ssh-mcp.XXXXXXXX")
+  # The path is validated HERE, before it is persisted. Storing first and
+  # checking after would write a rejected path into the session: the next call
+  # recovers it, finds the directory exists, skips this branch, and fails the
+  # check again — exiting forever with no self-healing path.
+  case "$D" in *[\'\"\ ]*) echo "ssh-mcp: unsafe workdir path" >&2; exit 78;; esac
   tmux set-environment -t <session> SSH_MCP_DIR "$D"
 }
 find "$D" -type f -mtime +7 -delete 2>/dev/null || true
@@ -224,6 +229,14 @@ across restarts.
 A `[ -O "$D" ]` ownership test was considered and rejected: `-O` is not in POSIX
 `test` and `dash` does not guarantee it. `mktemp -d` removes the need for the
 check.
+
+The order of the quote guard and `set-environment` is load-bearing, not
+cosmetic. Validating after storing would write a rejected path into the session:
+the next call recovers it, finds the directory present, skips the creating
+branch, and fails the check again — leaving the session permanently unusable
+with no self-healing path. The guard therefore runs on the freshly created path,
+before it is persisted. One guard in that position suffices, because a path
+recovered from the session is then by construction one that already passed.
 
 Stale files are pruned at bootstrap with `find "$D" -type f -mtime +7 -delete`,
 covering jobs whose results were never collected.
