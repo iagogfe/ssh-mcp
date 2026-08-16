@@ -24,6 +24,72 @@ parsers, no I/O, no imports from `src/index.ts` — and puts `probeTmux()` and
 decision in the spec stands unchanged. The payoff: the whole new module is unit
 testable with no SSH server, which is the testing goal the spec set out.
 
+## Rebase delta — this plan predates #3 and #4
+
+The plan was written against `aea09ae`. Client routing (#3) and the single-host
+restoration (#4) have since landed, so `src/index.ts` grew from 954 to ~980
+lines and every line reference below has moved. The mechanisms the plan depends
+on are all intact; only their addresses and the connection lookup changed.
+
+| Anchor | Line in the plan | Line on current main |
+|---|---|---|
+| `class SSHConnectionManager` | 301 | 339 |
+| `tokenSeq` field | 309 | 347 |
+| `ensureElevated` | 428 | 390 |
+| `conn.shell({... cols: 80 })` | 443 | 485 |
+| `execSshCommandWithConnection` | 722 | 787 |
+| su-shell fencing branch | 748-792 | ~813-857 |
+| `conn.exec(command, ...)` | 796 | 861 |
+| `registerTool("exec")` | 563 | 681 |
+
+**One connection manager per destination.** The module-level `connectionManager`
+singleton is gone. Managers now live in a `DestinationManagerCache` keyed by
+host/port/user, and both tools obtain theirs with:
+
+```typescript
+const { manager } = await getConnectionManager(client, /* includeSudo */ false);
+```
+
+Wherever a task below writes `connectionManager`, read it as that `manager`.
+Tasks 1-3 are untouched by this, since `src/tmux.ts` is pure.
+
+**Mode resolution is already per-destination and needs no change.** `resolveMode`
+lives on `SSHConnectionManager` (Task 4), so each destination is probed
+independently. One host having tmux while another does not is handled for free.
+
+**Correction to an earlier note: the tmux session name stays fixed.** An earlier
+reading of this rebase suggested deriving the session name from the target. That
+is wrong and would be pointless work. Each manager is exactly one
+`(host, port, user)`, the tmux session lives on the *remote* host, and tmux
+sockets are per remote user — so `ssh-mcp` cannot collide between two managers.
+`--tmuxSession` still earns its place, but only for the case it was introduced
+for: two MCP server processes connecting as the same user to the same host.
+
+**`job_status` needs a `client` parameter.** A job lives in one destination's
+tmux session, so collecting it requires the same manager that started it. Task 6
+Step 7 must register:
+
+```typescript
+    inputSchema: z.object({
+      jobId: z.string().describe("The jobId returned by exec with detach: true"),
+      client: z.string().optional().describe("Client whose session holds the job. Omit when the server is pinned to a single host."),
+      maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables."),
+    }),
+  }, async ({ jobId, client, maxBytes }) => {
+    const { manager } = await getConnectionManager(client, false);
+    await manager.ensureConnected();
+    await ensureMode(manager);
+    return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes));
+  });
+```
+
+This replaces the `if (!connectionManager)` guard in that step, which no longer
+has a singleton to check.
+
+**The `SU_ACTIVE` gate in Task 6 Step 7 still applies** and is unchanged.
+
+---
+
 ## Global Constraints
 
 - Node >= 20; no new npm dependencies.
