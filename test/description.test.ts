@@ -3,40 +3,67 @@ import { spawn } from 'child_process';
 import { join } from 'path';
 
 const testServerPath = join(process.cwd(), 'build', 'index.js');
+const clientMapPath = join(process.cwd(), 'test', 'fixtures', 'client-map.md');
 const START_TIMEOUT = 10000;
 
 beforeAll(() => {
   process.env.SSH_MCP_TEST = '1';
 });
 
-function runMcpCommand(command: string, description?: string, extraArgs: string[] = [], toolName = 'exec'): Promise<any> {
+interface ToolRequest {
+  command: string;
+  description?: string;
+  client?: string | null;
+  toolName?: string;
+}
+
+function runMcpCommands(
+  requests: ToolRequest[],
+  extraArgs: string[] = [],
+  extraEnv: Record<string, string> = {},
+): Promise<any[]> {
   const args = [
     testServerPath,
-    '--host=127.0.0.1',
     '--insecureHostKey',
     '--port=2222',
-    '--user=test',
-    '--password=secret',
     '--timeout=60000',
     ...extraArgs,
   ];
 
   return new Promise((resolve, reject) => {
-    const child = spawn('node', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, SSH_MCP_TEST: '1' } });
+    const child = spawn('node', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        SSH_MCP_TEST: '1',
+        SSH_MCP_CLIENT_MAP: clientMapPath,
+        SSH_MCP_USER: 'test',
+        SSH_MCP_PASSWORD: 'secret',
+        ...extraEnv,
+      },
+    });
     let buffer = '';
+    const responses: any[] = [];
     const startup = setTimeout(() => {
       child.kill();
       reject(new Error('Server start timeout'));
     }, START_TIMEOUT);
 
-    // Build the tool call with optional description
-    const toolArguments: any = { command };
-    if (description !== undefined) {
-      toolArguments.description = description;
-    }
-    
     const initMsg = { jsonrpc: '2.0', id: 0, method: 'initialize', params: { capabilities: {}, clientInfo: { name: 't', version: '1' }, protocolVersion: '0.1.0' } };
-    const toolCall = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: toolName, arguments: toolArguments } };
+
+    const sendRequest = (index: number) => {
+      const request = requests[index];
+      const toolArguments: Record<string, string> = { command: request.command };
+      if (typeof request.client === 'string') toolArguments.client = request.client;
+      if (request.description !== undefined) toolArguments.description = request.description;
+      const toolCall = {
+        jsonrpc: '2.0',
+        id: index + 1,
+        method: 'tools/call',
+        params: { name: request.toolName ?? 'exec', arguments: toolArguments },
+      };
+      child.stdin.write(JSON.stringify(toolCall) + '\n');
+    };
 
     child.stdout.on('data', (d) => {
       buffer += d.toString();
@@ -46,12 +73,16 @@ function runMcpCommand(command: string, description?: string, extraArgs: string[
         try {
           const msg = JSON.parse(line);
           if (msg.id === 0) {
-            child.stdin.write(JSON.stringify(toolCall) + '\n');
-          } else if (msg.id === 1) {
-            clearTimeout(startup);
-            resolve(msg);
-            child.kill();
-            return;
+            sendRequest(0);
+          } else if (typeof msg.id === 'number' && msg.id > 0) {
+            responses.push(msg);
+            if (responses.length === requests.length) {
+              clearTimeout(startup);
+              resolve(responses);
+              child.kill();
+              return;
+            }
+            sendRequest(responses.length);
           }
         } catch (e) {
           // ignore non-json
@@ -67,6 +98,18 @@ function runMcpCommand(command: string, description?: string, extraArgs: string[
       child.stdin.write(JSON.stringify(initMsg) + '\n');
     }, 100);
   });
+}
+
+async function runMcpCommand(
+  command: string,
+  description?: string,
+  extraArgs: string[] = [],
+  toolName = 'exec',
+  client: string | null = 'Test Client One',
+  extraEnv: Record<string, string> = {},
+): Promise<any> {
+  const [response] = await runMcpCommands([{ client, command, description, toolName }], extraArgs, extraEnv);
+  return response;
 }
 
 describe('command description functionality', () => {
@@ -89,7 +132,14 @@ describe('command description functionality', () => {
   });
 
   it('should work with sudo-exec tool and description', async () => {
-    const res = await runMcpCommand('whoami', 'Check current user identity', ['--sudoPassword=secret'], 'sudo-exec');
+    const res = await runMcpCommand(
+      'whoami',
+      'Check current user identity',
+      [],
+      'sudo-exec',
+      'Test Client One',
+      { SSH_MCP_SUDO_PASSWORD: 'secret' },
+    );
     expect(res.error).toBeUndefined();
     // Should execute successfully with sudo
   });
@@ -98,5 +148,35 @@ describe('command description functionality', () => {
     const res = await runMcpCommand('pwd', '');
     expect(res.error).toBeUndefined();
     expect(res.result?.content?.[0]?.text).toBeTruthy();
+  });
+
+  it('rejects an exec call without a client before attempting SSH', async () => {
+    const res = await runMcpCommand('echo should-not-run', undefined, [], 'exec', null);
+    const serialized = JSON.stringify(res);
+
+    expect(res.result?.isError).toBe(true);
+    expect(serialized).toMatch(/client/i);
+    expect(serialized).not.toContain('ECONNREFUSED');
+  });
+
+  it('returns a client resolution error before attempting SSH for an unknown client', async () => {
+    const res = await runMcpCommand('echo should-not-run', undefined, [], 'exec', 'Unknown Client');
+    const serialized = JSON.stringify(res);
+
+    expect(serialized).toMatch(/Client not found: Unknown Client/i);
+    expect(serialized).not.toContain('ECONNREFUSED');
+    expect(serialized).not.toContain('secret');
+  });
+
+  it('routes two clients sequentially in the same MCP process', async () => {
+    const responses = await runMcpCommands([
+      { client: 'Test Client One', command: 'printf client-one' },
+      { client: 'Test Client Two', command: 'printf client-two' },
+    ]);
+
+    expect(responses[0].error).toBeUndefined();
+    expect(responses[0].result?.content?.[0]?.text).toContain('client-one');
+    expect(responses[1].error).toBeUndefined();
+    expect(responses[1].result?.content?.[0]?.text).toContain('client-two');
   });
 });

@@ -8,6 +8,13 @@ import { createHash, createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import {
+  loadPlanetfone4Hosts,
+  type ClientResolution,
+  type PlanetfoneClient,
+} from './client-map.js';
+import { resolveClientForProtocol } from './client-protocol.js';
+import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseMaxBytes } from './output.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
@@ -43,10 +50,29 @@ function resolveSecret(flag: string | null | undefined, env: string | undefined)
   return undefined;
 }
 
-const HOST = argvConfig.host ?? process.env.SSH_MCP_HOST;
+export function resolveCredential(
+  flag: string | null | undefined,
+  legacy: string | undefined,
+  official: string | undefined,
+): string | null | undefined {
+  return resolveSecret(flag, official ?? legacy);
+}
+
+export function shouldLoadPrivateKey(
+  password: string | undefined,
+  keyPath: string | undefined,
+): keyPath is string {
+  return password === undefined && keyPath !== undefined;
+}
+
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : (process.env.SSH_MCP_PORT ? parseInt(process.env.SSH_MCP_PORT) : 22);
-const USER = argvConfig.user ?? process.env.SSH_MCP_USER;
-const PASSWORD = resolveSecret(argvConfig.password, process.env.SSH_MCP_PASSWORD) ?? undefined;
+export const CLIENT_MAP_PATH = process.env.SSH_MCP_CLIENT_MAP ?? './config/client-map.md';
+export const USER = argvConfig.user ?? process.env.SSH_MCP_USER;
+export const PASSWORD = resolveCredential(
+  argvConfig.password,
+  undefined,
+  process.env.SSH_MCP_PASSWORD,
+) ?? undefined;
 const SUPASSWORD = resolveSecret(argvConfig.suPassword, process.env.SSH_MCP_SU_PASSWORD);
 const SUDOPASSWORD = resolveSecret(argvConfig.sudoPassword, process.env.SSH_MCP_SUDO_PASSWORD);
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
@@ -95,8 +121,6 @@ function resolveMaxBytes(callMax: number | undefined): number {
 
 function validateConfig(config: Record<string, string | null>) {
   const errors = [];
-  if (!config.host) errors.push('Missing required --host');
-  if (!config.user) errors.push('Missing required --user');
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
@@ -403,6 +427,10 @@ export class SSHConnectionManager {
     return this.sshConfig.sudoPassword;
   }
 
+  setSudoPassword(pwd?: string): void {
+    this.sshConfig.sudoPassword = pwd;
+  }
+
   getSuPassword(): string | undefined {
     return this.sshConfig.suPassword;
   }
@@ -545,7 +573,63 @@ export class SSHConnectionManager {
   }
 }
 
-let connectionManager: SSHConnectionManager | null = null;
+let configuredClients: PlanetfoneClient[] | null = null;
+const connectionManagers = new DestinationManagerCache<SSHConnectionManager>();
+
+function getConfiguredClients(): PlanetfoneClient[] {
+  if (!configuredClients) {
+    configuredClients = loadPlanetfone4Hosts(CLIENT_MAP_PATH);
+  }
+  return configuredClients;
+}
+
+async function getConnectionManager(
+  client: string,
+  includeSudo: boolean,
+): Promise<{ manager: SSHConnectionManager; resolution: ClientResolution }> {
+  const resolution = resolveClientForProtocol(getConfiguredClients(), client);
+  if (!USER) {
+    throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required username');
+  }
+
+  const manager = await connectionManagers.getOrCreateAsync(
+    resolution.host,
+    PORT,
+    USER,
+    async () => {
+      const sshConfig: SSHConfig = {
+        host: resolution.host,
+        port: PORT,
+        username: USER,
+        hostFingerprint: HOST_FINGERPRINT,
+        knownHostsPath: KNOWN_HOSTS_PATH,
+        insecureHostKey: INSECURE_HOST_KEY,
+      };
+
+      if (PASSWORD !== undefined) {
+        sshConfig.password = PASSWORD;
+      } else if (shouldLoadPrivateKey(PASSWORD, KEY)) {
+        const fs = await import('fs/promises');
+        sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+      }
+
+      if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+        sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+      }
+      if (includeSudo && SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+        sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
+      }
+
+      return new SSHConnectionManager(sshConfig);
+    },
+  );
+
+  return { manager, resolution };
+}
+
+function closeAllConnectionManagers(): void {
+  connectionManagers.closeAll();
+}
 
 const server = new McpServer(
   {
@@ -561,50 +645,24 @@ const server = new McpServer(
 );
 
 server.registerTool("exec", { description: "Execute a shell command on the remote SSH server and return the output.", inputSchema: z.object({
+        client: z.string().describe('Planetfone client name from the configured inventory'),
         command: z.string().describe("Shell command to execute on the remote SSH server"),
         description: z.string().optional().describe("Optional description of what this command will do"),
         maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
-      }) }, async ({ command, description, maxBytes }) => {
-        // Sanitize command input
-        const sanitizedCommand = sanitizeCommand(command);
-
+      }) }, async ({ client, command, description, maxBytes }) => {
         try {
-          // Initialize connection manager if not already done
-          if (!connectionManager) {
-            if (!HOST || !USER) {
-              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required host or username');
-            }
-            const sshConfig: SSHConfig = {
-              host: HOST,
-              port: PORT,
-              username: USER,
-              hostFingerprint: HOST_FINGERPRINT,
-              knownHostsPath: KNOWN_HOSTS_PATH,
-              insecureHostKey: INSECURE_HOST_KEY,
-            };
-
-            if (PASSWORD) {
-              sshConfig.password = PASSWORD;
-            } else if (KEY) {
-              const fs = await import('fs/promises');
-              sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-            }
-
-            if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-              sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-            }
-            connectionManager = new SSHConnectionManager(sshConfig);
-          }
+          const { manager } = await getConnectionManager(client, false);
+          const sanitizedCommand = sanitizeCommand(command);
 
           // Ensure connection is active (reconnect if needed)
-          await connectionManager.ensureConnected();
+          await manager.ensureConnected();
 
           // If a suPassword was provided, explicitly wait for elevation before executing.
           // This is critical: ensureElevated is idempotent and will return immediately if
           // already elevated, so this ensures we have a su shell before we try to use it.
-          if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
+          if (manager.getSuPassword()) {
             try {
-              const elevationPromise = (connectionManager as any).ensureElevated();
+              const elevationPromise = (manager as any).ensureElevated();
               // Add a short timeout for elevation to complete
               await Promise.race([
                 elevationPromise,
@@ -620,7 +678,7 @@ server.registerTool("exec", { description: "Execute a shell command on the remot
             ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
             : sanitizedCommand;
 
-          const result = await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+          const result = await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
           return result;
         } catch (err: any) {
           // Wrap unexpected errors
@@ -632,57 +690,30 @@ server.registerTool("exec", { description: "Execute a shell command on the remot
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
   server.registerTool("sudo-exec", { description: "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.", inputSchema: z.object({
+              client: z.string().describe('Planetfone client name from the configured inventory'),
               command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
               description: z.string().optional().describe("Optional description of what this command will do"),
               maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
-            }) }, async ({ command, description, maxBytes }) => {
-              const sanitizedCommand = sanitizeCommand(command);
-
+            }) }, async ({ client, command, description, maxBytes }) => {
               try {
-                if (!connectionManager) {
-                  if (!HOST || !USER) {
-                    throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required host or username');
-                  }
+                const { manager } = await getConnectionManager(client, true);
+                const sanitizedCommand = sanitizeCommand(command);
 
-                  const sshConfig: SSHConfig = {
-                    host: HOST,
-                    port: PORT || 22,
-                    username: USER,
-                    hostFingerprint: HOST_FINGERPRINT,
-                    knownHostsPath: KNOWN_HOSTS_PATH,
-                    insecureHostKey: INSECURE_HOST_KEY,
-                  };
-                  if (PASSWORD) {
-                    sshConfig.password = PASSWORD;
-                  } else if (KEY) {
-                    const fs = await import('fs/promises');
-                    sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-                  }
-                  if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-                    sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-                  }
-                  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-                    sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-                  }
-                  connectionManager = new SSHConnectionManager(sshConfig);
-                }
-
-                await connectionManager.ensureConnected();
+                await manager.ensureConnected();
 
                 // If suPassword or sudoPassword were provided on this call but the
                 // existing connection manager was created earlier without them,
                 // update the manager's values so the subsequent sudo-exec call uses
                 // the latest passwords.
                 if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-                  await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
+                  await manager.setSuPassword(sanitizePassword(SUPASSWORD));
                 }
                 if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-                  // update sudoPassword on the manager instance
-                  (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
+                  manager.setSudoPassword(sanitizePassword(SUDOPASSWORD));
                 }
 
                 let wrapped: string;
-                const sudoPassword = connectionManager.getSudoPassword();
+                const sudoPassword = manager.getSudoPassword();
 
                 // Append description as comment if provided
                 const commandWithDescription = description
@@ -694,14 +725,14 @@ if (!DISABLE_SUDO) {
                 // no stdin channel to feed the password through — and feeding the
                 // password into the shell instead would echo it back as a failed command
                 // whenever sudo did not ask for one.
-                if (connectionManager.isRootShell()) {
-                  return await execSshCommandWithConnection(connectionManager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+                if (manager.isRootShell()) {
+                  return await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
                 }
 
                 if (!sudoPassword) {
                   // No password provided, use -n to fail if sudo requires a password
                   wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-                  return await execSshCommandWithConnection(connectionManager, wrapped, undefined, resolveMaxBytes(maxBytes));
+                  return await execSshCommandWithConnection(manager, wrapped, undefined, resolveMaxBytes(maxBytes));
                 }
 
                 // Password provided — feed it to `sudo -S` over the channel's stdin instead
@@ -710,7 +741,7 @@ if (!DISABLE_SUDO) {
                 // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
                 // password is always read from the first line of stdin.
                 wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-                return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
+                return await execSshCommandWithConnection(manager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
               } catch (err: any) {
                 if (err instanceof ProtocolError) throw err;
                 throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -906,8 +937,8 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
   });
 }
 
-// ponytail: stdio serves exactly one connection per process, so the factory hands
-// back the module-level singleton instead of building a fresh instance per call.
+// stdio serves exactly one MCP server per process; SSH destinations are managed
+// independently by the per-host connection cache above.
 const serverFactory = () => server;
 
 async function main() {
@@ -918,21 +949,15 @@ async function main() {
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
     void handle.close();
-    if (connectionManager) {
-      connectionManager.close();
-      connectionManager = null;
-    }
+    closeAllConnectionManagers();
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-  process.on('exit', () => {
-    if (connectionManager) {
-      connectionManager.close();
-    }
-  });
 }
+
+process.on('exit', closeAllConnectionManagers);
 
 // Initialize server in test mode for automated tests
 if (isTestMode) {
@@ -944,9 +969,7 @@ if (isTestMode) {
 else if (isCliEnabled) {
   main().catch((error) => {
     console.error("Fatal error in main():", error);
-    if (connectionManager) {
-      connectionManager.close();
-    }
+    closeAllConnectionManagers();
     process.exit(1);
   });
 }
