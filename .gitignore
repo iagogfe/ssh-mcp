@@ -137,3 +137,7 @@ dist
 
 # Ignore build output
 build/
+
+# Agent workflow scratch (SDD ledgers, briefs, review packages).
+# Never commit: these reports quote real inventory data.
+.superpowers/
