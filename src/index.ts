@@ -803,6 +803,38 @@ const SU_ACTIVE = SUPASSWORD !== null && SUPASSWORD !== undefined;
 // silently NOT persisting state.
 const TMUX_ATTEMPTED = !NO_TMUX && !SU_ACTIVE;
 
+// Shared schema fragments. `client` only means anything when an inventory is
+// configured: on a server pinned to --host, passing it can only ever produce
+// "No client inventory configured", so registering it advertises an
+// affordance that does not exist and spends the agent's context on it every
+// session. Same rule the tool registrations below already follow for
+// sudo-exec and job_status, applied to the parameters.
+// `client` is always registered, never conditionally: an undeclared key is
+// STRIPPED by zod, so the handler would never see it and never refuse it --
+// and a `client` silently ignored means the command runs on the pinned host
+// instead of the one the caller named. Wrong machine, no error. The loud
+// "No client inventory configured" it gets today is worth keeping.
+//
+// What is conditional is the description: with no inventory configured there
+// is nothing to describe, and prose about selecting from an inventory that
+// does not exist is context spent teaching a dead end.
+const CLIENT_FIELD = {
+  client: CLIENT_MAP_PATH
+    ? z.string().optional().describe('Client name from the configured inventory. Omit to use the default target.')
+    : z.string().optional(),
+};
+const maxBytesField = (withDefault: boolean) =>
+  z.number().int().optional().describe(
+    withDefault
+      ? 'Max output bytes before head+tail truncation; 0 disables. Defaults to server config.'
+      : 'Max output bytes before head+tail truncation; 0 disables.',
+  );
+
+// One definition for the three tools that take it. The old text also promised
+// it "defaults to server config", which every optional field does.
+const MAXBYTES_FIELD = z.number().int().optional()
+  .describe('Output byte budget; the middle is dropped past it. 0 disables.');
+
 const server = new McpServer(
   {
     name: 'SSH MCP Server',
@@ -817,28 +849,23 @@ const server = new McpServer(
 );
 
 server.registerTool("exec", { description:
-      "Execute a shell command on the remote SSH server and return its output. " +
+      "Run a shell command on the remote SSH server. " +
       (SU_ACTIVE
-        ? "Shell state persists between calls through the long-lived `su -` root " +
-          "shell this server opened at connection time: cd changes the working " +
-          "directory and export'd variables stay set for later commands -- no need " +
-          "to chain commands with && or cd back into place every time. This mode has " +
-          "no tmux session, so detach/job_status are not available."
+        ? "State persists between calls: this connection runs through one long-lived " +
+          "`su -` root shell, so cd and export survive -- no chaining with && needed. " +
+          "No tmux session here, so detach and job_status do not exist."
         : TMUX_ATTEMPTED
-          ? "Shell state persists between calls: cd changes the working directory and " +
-            "export'd variables stay set for later commands in this same session -- no " +
-            "need to chain commands with && or cd back into place every time. " +
-            "For long-running work, pass detach: true to get a jobId back immediately " +
-            "instead of blocking, then poll it with job_status."
-          : "Each call runs in its own shell: cd and export'd variables do NOT persist " +
-            "between calls -- chain related commands with && or ; in one call, or cd " +
-            "back into place every time."),
+          ? "State persists between calls: cd and export survive, so there is no need " +
+            "to chain with && or cd back each time. For long work, pass detach: true " +
+            "and poll the jobId with job_status."
+          : "Each call runs in its own shell: cd and export do NOT persist. Chain " +
+            "related commands with && or ; in one call."),
       inputSchema: z.object({
-        client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
+        ...CLIENT_FIELD,
         command: z.string().describe("Shell command to execute on the remote SSH server"),
         description: z.string().optional().describe("Optional description of what this command will do"),
-        detach: z.boolean().optional().describe("Run in the background and return a jobId immediately instead of waiting; collect the result with job_status. Only available in the persistent tmux session (not with --suPassword or --noTmux)."),
-        maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
+        detach: z.boolean().optional().describe("Run in the background and return a jobId instead of blocking; collect it with job_status. Only in tmux mode."),
+        maxBytes: MAXBYTES_FIELD,
       }) }, async ({ client, command, description, detach, maxBytes }) => {
         try {
           const { manager } = await getConnectionManager(client, false);
@@ -923,32 +950,28 @@ if (!DISABLE_SUDO) {
   //     on its own separate channel starting from the login directory, blind
   //     to any cd a prior exec/sudo-exec call made.
   const sudoExecDescription = SU_ACTIVE
-    ? "Execute a shell command on the remote SSH server. This connection already " +
-      "runs through a long-lived `su -` root shell, so the command runs directly on " +
-      "that shell with NO sudo wrapper at all: the configured sudo password (if any) " +
-      "is not used, and sudoers policy does not apply. cd/export from this call " +
-      "persist in the su shell for later exec/sudo-exec calls."
+    ? "Run a shell command on the remote SSH server. This connection already runs " +
+      "through a long-lived `su -` root shell, so the command runs on that shell with " +
+      "NO sudo wrapper: the configured sudo password is unused and sudoers policy " +
+      "does not apply. cd/export from this call persist for later calls."
     : !TMUX_ATTEMPTED
-      ? "Execute a shell command on the remote SSH server using sudo. Uses the " +
-        "configured sudo password if present, otherwise passwordless sudo. Each call " +
-        "runs in its own shell; nothing persists between calls."
+      ? "Run a shell command with sudo, using the configured password if present. " +
+        "Each call runs in its own shell; nothing persists."
       : SUDO_PASSWORD_CONFIGURED
-        ? "Execute a shell command on the remote SSH server using the configured sudo " +
-          "password. This takes it off exec's persistent session entirely (sudo -S " +
-          "needs a private stdin the shared session can't provide): it starts from the " +
-          "login directory, not wherever a prior cd left the session, and nothing it " +
-          "does persists either."
-        : "Execute a shell command on the remote SSH server using passwordless sudo. " +
-          "It reads exec's persistent session -- so it sees whatever directory a prior " +
-          "cd left it in -- but never writes it back: its own cd/export do not persist, " +
-          "for this or later calls.";
+        ? "Run a shell command with the configured sudo password. This runs OFF " +
+          "exec's session (sudo -S needs a private stdin the shared pane cannot give): " +
+          "it starts from the login directory, not wherever a prior cd left the " +
+          "session, and nothing it does persists."
+        : "Run a shell command with passwordless sudo. It reads exec's session, so it " +
+          "sees whatever directory a prior cd left it in, but never writes back: its " +
+          "own cd/export do not persist.";
 
   server.registerTool("sudo-exec", { description: sudoExecDescription,
       inputSchema: z.object({
-              client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
+              ...CLIENT_FIELD,
               command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
               description: z.string().optional().describe("Optional description of what this command will do"),
-              maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
+              maxBytes: MAXBYTES_FIELD,
             }) }, async ({ client, command, description, maxBytes }) => {
               try {
                 const { manager } = await getConnectionManager(client, true);
@@ -1021,14 +1044,13 @@ if (!DISABLE_SUDO) {
 // TMUX_ATTEMPTED above, shared with exec's description).
 if (TMUX_ATTEMPTED) {
   server.registerTool("job_status", { description:
-      "Check on a background job started with exec(detach: true). While the job " +
-      "is still running this returns its elapsed time and the tail of its output " +
-      "so far; once it has finished it returns the full output and exit code, and " +
-      "frees the job's resources on the remote host.",
+      "Check a job started by exec(detach: true). While it runs: elapsed time and " +
+      "the tail of its output. Once finished: the full output and exit code, and the " +
+      "job is cleared, so collect it only once.",
       inputSchema: z.object({
         jobId: z.string().describe("The jobId returned by exec with detach: true"),
-        client: z.string().optional().describe('Client whose session holds the job. Omit when the server is pinned to a single host.'),
-        maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables."),
+        ...CLIENT_FIELD,
+        maxBytes: MAXBYTES_FIELD,
       }) }, async ({ jobId, client, maxBytes }) => {
         try {
           const { manager } = await getConnectionManager(client, false);
