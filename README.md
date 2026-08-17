@@ -328,7 +328,7 @@ die
 rm -rf /tmp/x
 ```
 
-the aliased `return` only returns from *that function's own call frame*, not from the whole sourced script, so execution continues past the call site — and `rm -rf /tmp/x` still runs, on both `dash` and `bash`. This is documented, not fixed, in `src/tmux.ts`: fixing it would mean either giving up the sourcing that makes `cd`/`export` persist, or letting `exit` kill the pane shell again, which is worse. The verified workaround is to write the helper with `return` and check it explicitly at the call site:
+the aliased `return` only returns from *that function's own call frame*, not from the whole sourced script, so execution continues past the call site — and `rm -rf /tmp/x` still runs, on both `dash` and `bash`. Worse, the tool call reports success: the swallowed `exit 1` never reaches the sourced script's own exit code, so the last command that actually ran (`rm -rf /tmp/x`) determines it, and the response comes back with exit 0 and `isError` falsy — nothing distinguishes it from a command whose guard never fired. This is documented, not fixed, in `src/tmux.ts`: fixing it would mean either giving up the sourcing that makes `cd`/`export` persist, or letting `exit` kill the pane shell again, which is worse. The verified workaround is to write the helper with `return` and check it explicitly at the call site:
 
 ```sh
 die() { echo "failed" >&2; return 1; }
@@ -340,7 +340,7 @@ A bare `exit` at the sourced command's own top level (not inside a function you 
 
 ### Recovery
 
-- `tmux attach -t ssh-mcp` on the remote host (substitute your `--tmuxSession` name) shows the live session, including any command currently running.
+- `tmux attach -r -t ssh-mcp` on the remote host (substitute your `--tmuxSession` name) shows the live session, including any command currently running. Use the read-only `-r` flag: `send-keys` targets the session's current window's active pane, so a writable attach lets a human who switches windows or opens a pager redirect the next `exec`'s payload into it instead of the pane the tool expects.
 - A poisoned session — e.g. a command that ran `export PATH=/nada` — is cleared with `tmux kill-session -t ssh-mcp`; the next `exec`/`sudo-exec` call recreates it from scratch.
 
 ### Breaking changes in 2.0.0
