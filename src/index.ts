@@ -210,12 +210,6 @@ function sanitizePassword(password: string | undefined): string | undefined {
   return password;
 }
 
-// Escape command for use in shell contexts (like pkill)
-export function escapeCommandForShell(command: string): string {
-  // Replace single quotes with escaped single quotes
-  return command.replace(/'/g, "'\"'\"'");
-}
-
 // Strip CR/LF (and collapse whitespace) from a description before appending it as
 // a shell comment. Without this, a newline in the description would terminate the
 // comment and inject an extra command line into the shell.
@@ -1331,87 +1325,6 @@ export async function jobStatus(
     { stdout: status.stdout, stderr: status.stderr, exitCode: status.exitCode },
     maxBytes,
   );
-}
-
-// Keep the old function for backward compatibility (used in tests)
-export async function execSshCommand(sshConfig: any, command: string, stdin?: string, maxBytes: number = 8192): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
-  return new Promise((resolve, reject) => {
-    const conn = new Client();
-    let timeoutId: NodeJS.Timeout;
-    let isResolved = false;
-
-    // Set up timeout
-    timeoutId = setTimeout(() => {
-      if (!isResolved) {
-        isResolved = true;
-        // Try to abort the running command before closing connection
-        const abortTimeout = setTimeout(() => {
-          // If abort command itself times out, force close connection
-          conn.end();
-        }, 5000); // 5 second timeout for abort command
-
-        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err: Error | undefined, abortStream: ClientChannel | undefined) => {
-          if (abortStream) {
-            abortStream.on('close', () => {
-              clearTimeout(abortTimeout);
-              conn.end();
-            });
-          } else {
-            clearTimeout(abortTimeout);
-            conn.end();
-          }
-        });
-        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
-      }
-    }, DEFAULT_TIMEOUT);
-
-    conn.on('ready', () => {
-      conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
-        if (err) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH exec error: ${err.message}`));
-          }
-          conn.end();
-          return;
-        }
-        // If stdin provided, write it to the stream and end stdin
-        if (stdin && stdin.length > 0) {
-          try {
-            stream.write(stdin);
-          } catch (e) {
-            // ignore
-          }
-        }
-        try { stream.end(); } catch (e) { /* ignore */ }
-        let stdout = '';
-        let stderr = '';
-        stream.on('close', (code: number | null, signal: string | null) => {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            conn.end();
-            resolve(formatCommandResult({ stdout, stderr, exitCode: code, signal }, maxBytes));
-          }
-        });
-        stream.on('data', (data: Buffer) => {
-          stdout += data.toString();
-        });
-        stream.stderr.on('data', (data: Buffer) => {
-          stderr += data.toString();
-        });
-      });
-    });
-    conn.on('error', (err: Error) => {
-      if (!isResolved) {
-        isResolved = true;
-        clearTimeout(timeoutId);
-        reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
-      }
-    });
-    conn.connect(buildConnectConfig(sshConfig));
-  });
 }
 
 // stdio serves exactly one MCP server per process; SSH destinations are managed
