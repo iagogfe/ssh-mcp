@@ -117,6 +117,41 @@ describe('buildRunScript', () => {
     expect(s).not.toContain('while [ ! -f "$D/rc.$T" ]');
   });
 
+  // The wait loop's only exit used to be the rc file appearing. Nothing writes
+  // it once the tmux session is gone, and the SSH channel the loop runs on has
+  // already been abandoned by the timed-out caller -- so the loop spun forever.
+  // Verified live: `exec cmd`, `tmux kill-session` on its own session, and
+  // deleting the workdir each left a poller at ppid=1 still running minutes
+  // later. Ctrl-C recovery cannot help, because it writes rc into the very
+  // session/workdir that is gone.
+  it('gives up when the workdir disappears', () => {
+    const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec' });
+    expect(s).toContain('if [ ! -d "$D" ]; then');
+    expect(s).toMatch(/workdir.*(disappear|gone|vanish)/i);
+  });
+
+  it('gives up when the tmux session disappears', () => {
+    const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec' });
+    // The preamble already contains one has-session; asserting its mere
+    // presence would pass without the fix. The wait loop adds a second.
+    expect(s.match(/tmux has-session -t ssh-mcp/g)?.length).toBe(2);
+    expect(s).toMatch(/session.*(disappear|gone|vanish)/i);
+  });
+
+  it('checks session liveness periodically, not on every iteration', () => {
+    const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec' });
+    // A has-session fork on every pass would cost more than the poll it guards.
+    expect(s).toMatch(/\$\(\(n % \d+\)\)/);
+  });
+
+  it('does not add liveness checks to the detached script, which has no wait loop', () => {
+    const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec', detach: true });
+    // The preamble's own has-session stays; what must NOT appear is the second
+    // one the wait loop adds, nor the workdir guard.
+    expect(s.match(/tmux has-session -t ssh-mcp/g)?.length).toBe(1);
+    expect(s).not.toContain('if [ ! -d "$D" ]; then');
+  });
+
   it('returns stdout, stderr and the exit code through the channel', () => {
     const s = buildRunScript(base);
     expect(s).toContain('cat "$D/out.$T"');

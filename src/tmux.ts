@@ -184,10 +184,34 @@ export function buildRunScript(opts: RunScriptOptions): string {
       // cadence rather than forking `sleep` hundreds of times: on a 3 s command
       // a flat 0.01 spent 2.8x the forks of 0.1, this schedule 1.9x, and past
       // ~1.2 s it costs exactly what 0.1 always did.
+      //
+      // The loop also has to be able to GIVE UP. Its only exit used to be the
+      // rc file appearing -- but nothing writes that once the tmux session or
+      // the workdir is gone, and by then the caller has already timed out and
+      // abandoned this SSH channel, so nothing kills the loop either. Verified
+      // live on a real host: `exec cmd` (replaces the pane shell),
+      // `tmux kill-session` on its own session, and a command that deletes the
+      // workdir (a `/tmp` sweep does it) each left a poller at ppid=1 still
+      // spinning minutes later, accumulating for the life of the machine.
+      // Ctrl-C recovery cannot rescue these: it writes rc into the very
+      // session/workdir that no longer exists.
+      //
+      // Two guards, priced differently. The workdir test is a shell builtin, so
+      // it runs every pass. `tmux has-session` forks, so it waits until the slow
+      // tier (~0.6 s in, by which point a fast command has long finished) and
+      // then runs every 20th pass, i.e. about every 2 s -- bounding an orphan to
+      // seconds while costing ~0.3% of the wait it guards.
       'n=0; while [ ! -s "$D/rc.$T" ]; do n=$((n+1));'
         + ' if [ $n -lt 50 ]; then sleep 0.002;'
         + ' elif [ $n -lt 100 ]; then sleep 0.01;'
-        + ' else sleep 0.1; fi; done',
+        + ' else sleep 0.1; fi;'
+        + ' if [ ! -d "$D" ]; then'
+        + ' echo "ssh-mcp: the session workdir disappeared while the command was running;'
+        + ' its result cannot be collected" >&2; exit 75; fi;'
+        + ` if [ $n -ge 100 ] && [ $((n % 20)) -eq 0 ] && ! tmux has-session -t ${session} 2>/dev/null; then`
+        + ' echo "ssh-mcp: the tmux session disappeared while the command was running;'
+        + ' shell state is gone and the result cannot be collected" >&2; exit 75; fi;'
+        + ' done',
       'cat "$D/out.$T"',
       'cat "$D/err.$T" >&2',
       'RC=$(cat "$D/rc.$T")',
