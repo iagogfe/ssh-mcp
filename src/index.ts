@@ -845,11 +845,38 @@ server.registerTool("exec", { description:
 
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
-  server.registerTool("sudo-exec", { description:
-      "Execute a shell command on the remote SSH server using sudo. Will use sudo " +
-      "password if provided, otherwise assumes passwordless sudo. With passwordless " +
-      "sudo, shell state persists between calls the same way exec's does (cd, " +
-      "export'd variables); a sudo password forces a one-off, stateless invocation.",
+  // Whether a sudo password was configured at startup (bare --sudoPassword
+  // resolves to null, same non-active convention as SU_ACTIVE above). This is
+  // startup config, not a per-call argument -- the schema has no sudoPassword
+  // field -- so it's as safe to bake into the description at registration
+  // time as TMUX_ATTEMPTED is.
+  const SUDO_PASSWORD_CONFIGURED = SUDOPASSWORD !== null && SUDOPASSWORD !== undefined;
+  // sudo-exec's relationship to session state is NOT symmetric with exec's,
+  // so this is deliberately not a copy of exec's ternary:
+  // - no session at all (stateless/su mode): nothing persists, full stop.
+  // - passwordless sudo in tmux mode: runs `sudo -n sh` INSIDE the session,
+  //   so it reads the session's current directory, but as a subprocess it
+  //   can never write it back -- its own cd/export vanish with the call.
+  // - a configured sudo password takes it off the session entirely: sudo -S
+  //   needs a private stdin the shared pane can't provide, so that call runs
+  //   on its own separate channel starting from the login directory, blind
+  //   to any cd a prior exec/sudo-exec call made.
+  const sudoExecDescription = !TMUX_ATTEMPTED
+    ? "Execute a shell command on the remote SSH server using sudo. Uses the " +
+      "configured sudo password if present, otherwise passwordless sudo. Each call " +
+      "runs in its own shell; nothing persists between calls."
+    : SUDO_PASSWORD_CONFIGURED
+      ? "Execute a shell command on the remote SSH server using the configured sudo " +
+        "password. This takes it off exec's persistent session entirely (sudo -S " +
+        "needs a private stdin the shared session can't provide): it starts from the " +
+        "login directory, not wherever a prior cd left the session, and nothing it " +
+        "does persists either."
+      : "Execute a shell command on the remote SSH server using passwordless sudo. " +
+        "It reads exec's persistent session -- so it sees whatever directory a prior " +
+        "cd left it in -- but never writes it back: its own cd/export do not persist, " +
+        "for this or later calls.";
+
+  server.registerTool("sudo-exec", { description: sudoExecDescription,
       inputSchema: z.object({
               client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
               command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),

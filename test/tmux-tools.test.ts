@@ -154,4 +154,32 @@ describe('tool surface', () => {
     const text = res.result?.content?.[0]?.text ?? '';
     expect(text).toMatch(/detach/i);
   }, 20000);
+
+  // sudo-exec's relationship to session state is NOT symmetric with exec's:
+  // it can READ the session's working directory (passwordless, tmux mode)
+  // but never WRITE it back, and a configured sudo password takes it off the
+  // session entirely. Three distinct descriptions, one per mode -- not a
+  // copy of exec's persist/don't-persist ternary.
+  describe("sudo-exec's description matches what actually happens in each mode", () => {
+    it('stateless/su mode (--noTmux): plain "nothing persists", no session-reading claim', async () => {
+      const res = await rpc('tools/list', {}, ['--noTmux']);
+      const sudoExec = res.result.tools.find((t: any) => t.name === 'sudo-exec');
+      expect(sudoExec.description).toMatch(/nothing persists/i);
+      expect(sudoExec.description).not.toMatch(/session/i);
+    }, 20000);
+
+    it('tmux mode, no sudo password: reads the session directory but does not write it back', async () => {
+      const res = await rpc('tools/list', {}, []);
+      const sudoExec = res.result.tools.find((t: any) => t.name === 'sudo-exec');
+      expect(sudoExec.description).toMatch(/reads|sees/i);
+      expect(sudoExec.description).toMatch(/does not persist|never writes|do not persist/i);
+    }, 20000);
+
+    it('tmux mode, sudo password configured: starts from the login directory, blind to a prior cd', async () => {
+      const res = await rpc('tools/list', {}, ['--sudoPassword=secret']);
+      const sudoExec = res.result.tools.find((t: any) => t.name === 'sudo-exec');
+      expect(sudoExec.description).toMatch(/login directory/i);
+      expect(sudoExec.description).not.toMatch(/reads exec's persistent session/i);
+    }, 20000);
+  });
 });
