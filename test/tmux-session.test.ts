@@ -224,10 +224,11 @@ describe('tmux session against a dash-shelled pane (live SSH + tmux)', () => {
       undefined,
       0,
     );
-    // If dash wasn't actually found, tmux would still create the session
-    // (just with a dead pane), and preamble()'s `has-session || new-session`
-    // would silently recreate it with the container's default shell on the
-    // very next call -- the lane would go green having tested bash twice.
+    // If dash wasn't actually found, tmux's own remain-on-exit default kills
+    // the session the moment the dead pane's shell exits, and preamble()'s
+    // create-first bootstrap would then silently recreate it with the
+    // container's default shell on the very next call -- the lane would go
+    // green having tested bash twice.
     // Assert the pane is genuinely running dash before trusting anything
     // that follows.
     const paneCmd = await execSshCommandWithConnection(
@@ -263,6 +264,39 @@ describe('tmux session against a dash-shelled pane (live SSH + tmux)', () => {
         await execSshCommandWithConnection(setup, `tmux kill-session -t ${dashSession} 2>/dev/null || true`, undefined, 0);
       } catch { /* ignore */ }
       setup.close();
+    }
+  }, 30000);
+});
+
+describe('tmux session bootstrap race (live SSH + tmux)', () => {
+  // MCP clients issue parallel tool calls, and execSshCommandWithConnection
+  // opens an independent channel per call -- so two concurrent execs against
+  // a cold destination run preamble()'s session-bootstrap line concurrently.
+  // A check-then-act `has-session || new-session` loses this race: both
+  // racers see no session, both call new-session, and the loser gets tmux's
+  // own "duplicate session" error, which set -eu turns into a hard failure
+  // (isError, not a thrown exception -- execSshCommandWithConnection reports
+  // a nonzero remote exit as a normal result). A fresh, never-attached
+  // session name per run is what makes this genuinely cold; fanning out
+  // several racers (not just two) keeps the race from being a coin flip.
+  it('lets many concurrent cold-start calls create the same session without one losing to "duplicate session"', async () => {
+    const session = 'ssh-mcp-race-' + Math.random().toString(36).slice(2, 8);
+    const m = new SSHConnectionManager({ ...cfg, tmuxSession: session });
+    await m.connect();
+    expect(await ensureMode(m)).toBe('tmux');
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          runInTmux(m, `echo racer-${i}`, { kind: 'exec', maxBytes: 0 })),
+      );
+      for (const r of results as any[]) {
+        expect(r.isError).not.toBe(true);
+      }
+    } finally {
+      try {
+        await execSshCommandWithConnection(m, `tmux kill-session -t ${session} 2>/dev/null || true`, undefined, 0);
+      } catch { /* ignore */ }
+      m.close();
     }
   }, 30000);
 });

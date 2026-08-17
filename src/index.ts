@@ -155,9 +155,11 @@ function validateConfig(config: Record<string, string | null>) {
   if (!hasHost && !hasClientMap) {
     errors.push('Missing target: pass --host for a single server, or --clientMap for an inventory');
   }
-  if (config.tmuxSession !== undefined && config.tmuxSession !== null) {
-    try { assertSessionName(config.tmuxSession); } catch (e: any) { errors.push(e.message); }
-  }
+  // Validates the fully-resolved session name (flag, then SSH_MCP_TMUX_SESSION,
+  // then the always-valid default) rather than just the raw CLI flag: an
+  // invalid name reaching the server only via the env var would otherwise
+  // start clean and fail later, on the first tool call, instead of at startup.
+  try { assertSessionName(TMUX_SESSION); } catch (e: any) { errors.push(e.message); }
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
   }
@@ -741,6 +743,19 @@ function closeAllConnectionManagers(): void {
   connectionManagers.closeAll();
 }
 
+// Whether a real, non-null suPassword was supplied. A bare --suPassword flag
+// (no '=value') resolves to null and does NOT enable su mode -- see the
+// SUPASSWORD assignment above. Declared once, here, and reused by both the
+// exec description below and the job_status registration gate further down,
+// so the two can't quietly drift apart on what "su mode is active" means.
+const SU_ACTIVE = SUPASSWORD !== null && SUPASSWORD !== undefined;
+// Whether exec/sudo-exec will actually attempt the persistent tmux session.
+// A host that turns out to be missing tmux still fails loudly at call time
+// (ensureMode throws, blocked mode never executes anything) -- the case this
+// description must not lie about is stateless/su mode, which succeeds while
+// silently NOT persisting state.
+const TMUX_ATTEMPTED = !NO_TMUX && !SU_ACTIVE;
+
 const server = new McpServer(
   {
     name: 'SSH MCP Server',
@@ -756,11 +771,15 @@ const server = new McpServer(
 
 server.registerTool("exec", { description:
       "Execute a shell command on the remote SSH server and return its output. " +
-      "Shell state persists between calls: cd changes the working directory and " +
-      "export'd variables stay set for later commands in this same session -- no " +
-      "need to chain commands with && or cd back into place every time. " +
-      "For long-running work, pass detach: true to get a jobId back immediately " +
-      "instead of blocking, then poll it with job_status.",
+      (TMUX_ATTEMPTED
+        ? "Shell state persists between calls: cd changes the working directory and " +
+          "export'd variables stay set for later commands in this same session -- no " +
+          "need to chain commands with && or cd back into place every time. " +
+          "For long-running work, pass detach: true to get a jobId back immediately " +
+          "instead of blocking, then poll it with job_status."
+        : "Each call runs in its own shell: cd and export'd variables do NOT persist " +
+          "between calls -- chain related commands with && or ; in one call, or cd " +
+          "back into place every time."),
       inputSchema: z.object({
         client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
         command: z.string().describe("Shell command to execute on the remote SSH server"),
@@ -904,12 +923,9 @@ if (!DISABLE_SUDO) {
 
 // job_status is only meaningful in tmux mode, which is also the only mode
 // that can produce a jobId (via exec's detach: true), so the tool is hidden
-// entirely when tmux is disabled or su mode is active. The su check mirrors
-// the SUPASSWORD null/undefined distinction used above: a bare --suPassword
-// flag resolves to null and does NOT enable su mode, so only a non-null,
-// non-undefined value should hide the tool.
-const SU_ACTIVE = SUPASSWORD !== null && SUPASSWORD !== undefined;
-if (!NO_TMUX && !SU_ACTIVE) {
+// entirely when tmux is disabled or su mode is active (see SU_ACTIVE/
+// TMUX_ATTEMPTED above, shared with exec's description).
+if (TMUX_ATTEMPTED) {
   server.registerTool("job_status", { description:
       "Check on a background job started with exec(detach: true). While the job " +
       "is still running this returns its elapsed time and the tail of its output " +

@@ -39,9 +39,11 @@ describe('assertToken', () => {
 describe('buildRunScript', () => {
   const base = { session: DEFAULT_TMUX_SESSION, token: 'k1z', kind: 'exec' as const };
 
-  it('bootstraps the session idempotently', () => {
+  it('bootstraps the session idempotently, attempting creation before checking', () => {
     const s = buildRunScript(base);
-    expect(s).toContain('tmux has-session -t ssh-mcp 2>/dev/null || tmux new-session -d -s ssh-mcp');
+    // Attempt creation first, not has-session-then-create: the latter is a
+    // check-then-act race between two concurrent cold calls (see src/tmux.ts).
+    expect(s).toContain('tmux new-session -d -s ssh-mcp 2>/dev/null || tmux has-session -t ssh-mcp');
   });
 
   it('recovers the workdir from the tmux environment before creating one', () => {

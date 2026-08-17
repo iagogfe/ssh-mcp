@@ -48,7 +48,16 @@ export interface RunScriptOptions {
 function preamble(session: string): string {
   return [
     'set -eu',
-    `tmux has-session -t ${session} 2>/dev/null || tmux new-session -d -s ${session}`,
+    // Idempotent, not check-then-act: `has-session || new-session` races two
+    // concurrent cold calls (normal under MCP, which issues parallel tool
+    // calls) -- both see no session, both attempt new-session, and the loser
+    // gets tmux's own "duplicate session" error, which `set -eu` turns into a
+    // hard failure of the whole script. Attempting the create FIRST removes
+    // the gap: the loser's new-session fails harmlessly (2>/dev/null) because
+    // the winner already made the session, and has-session then confirms it
+    // exists either way. A genuine failure (tmux cannot start a session at
+    // all) still fails both commands, so `set -e` still aborts correctly.
+    `tmux new-session -d -s ${session} 2>/dev/null || tmux has-session -t ${session}`,
     `D=$(tmux show-environment -t ${session} SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')`,
     'if [ -z "$D" ] || [ ! -d "$D" ]; then',
     '  D=$(mktemp -d "${TMPDIR:-/tmp}/ssh-mcp.XXXXXXXX")',
