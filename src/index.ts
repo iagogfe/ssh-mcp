@@ -771,15 +771,21 @@ const server = new McpServer(
 
 server.registerTool("exec", { description:
       "Execute a shell command on the remote SSH server and return its output. " +
-      (TMUX_ATTEMPTED
-        ? "Shell state persists between calls: cd changes the working directory and " +
-          "export'd variables stay set for later commands in this same session -- no " +
-          "need to chain commands with && or cd back into place every time. " +
-          "For long-running work, pass detach: true to get a jobId back immediately " +
-          "instead of blocking, then poll it with job_status."
-        : "Each call runs in its own shell: cd and export'd variables do NOT persist " +
-          "between calls -- chain related commands with && or ; in one call, or cd " +
-          "back into place every time."),
+      (SU_ACTIVE
+        ? "Shell state persists between calls through the long-lived `su -` root " +
+          "shell this server opened at connection time: cd changes the working " +
+          "directory and export'd variables stay set for later commands -- no need " +
+          "to chain commands with && or cd back into place every time. This mode has " +
+          "no tmux session, so detach/job_status are not available."
+        : TMUX_ATTEMPTED
+          ? "Shell state persists between calls: cd changes the working directory and " +
+            "export'd variables stay set for later commands in this same session -- no " +
+            "need to chain commands with && or cd back into place every time. " +
+            "For long-running work, pass detach: true to get a jobId back immediately " +
+            "instead of blocking, then poll it with job_status."
+          : "Each call runs in its own shell: cd and export'd variables do NOT persist " +
+            "between calls -- chain related commands with && or ; in one call, or cd " +
+            "back into place every time."),
       inputSchema: z.object({
         client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
         command: z.string().describe("Shell command to execute on the remote SSH server"),
@@ -852,29 +858,43 @@ if (!DISABLE_SUDO) {
   // time as TMUX_ATTEMPTED is.
   const SUDO_PASSWORD_CONFIGURED = SUDOPASSWORD !== null && SUDOPASSWORD !== undefined;
   // sudo-exec's relationship to session state is NOT symmetric with exec's,
-  // so this is deliberately not a copy of exec's ternary:
-  // - no session at all (stateless/su mode): nothing persists, full stop.
-  // - passwordless sudo in tmux mode: runs `sudo -n sh` INSIDE the session,
-  //   so it reads the session's current directory, but as a subprocess it
-  //   can never write it back -- its own cd/export vanish with the call.
-  // - a configured sudo password takes it off the session entirely: sudo -S
-  //   needs a private stdin the shared pane can't provide, so that call runs
-  //   on its own separate channel starting from the login directory, blind
-  //   to any cd a prior exec/sudo-exec call made.
-  const sudoExecDescription = !TMUX_ATTEMPTED
-    ? "Execute a shell command on the remote SSH server using sudo. Uses the " +
-      "configured sudo password if present, otherwise passwordless sudo. Each call " +
-      "runs in its own shell; nothing persists between calls."
-    : SUDO_PASSWORD_CONFIGURED
-      ? "Execute a shell command on the remote SSH server using the configured sudo " +
-        "password. This takes it off exec's persistent session entirely (sudo -S " +
-        "needs a private stdin the shared session can't provide): it starts from the " +
-        "login directory, not wherever a prior cd left the session, and nothing it " +
-        "does persists either."
-      : "Execute a shell command on the remote SSH server using passwordless sudo. " +
-        "It reads exec's persistent session -- so it sees whatever directory a prior " +
-        "cd left it in -- but never writes it back: its own cd/export do not persist, " +
-        "for this or later calls.";
+  // so this is deliberately not a copy of exec's ternary. Three real cases:
+  // - su mode (--suPassword): the connection already runs through a
+  //   long-lived `su -` root shell (see manager.isRootShell() below), so
+  //   sudo-exec runs the command directly on THAT shell -- no `sudo` wrapper
+  //   at all, the configured sudo password (if any) goes unused, and sudoers
+  //   policy never comes into play. cd/export DO persist here, same as
+  //   exec's, because it is the very same shell.
+  // - stateless mode (--noTmux, su NOT active): no session at all, nothing
+  //   persists, full stop.
+  // - tmux mode:
+  //   - passwordless sudo: runs `sudo -n sh` INSIDE the session, so it reads
+  //     the session's current directory, but as a subprocess it can never
+  //     write it back -- its own cd/export vanish with the call.
+  //   - a configured sudo password takes it off the session entirely: sudo -S
+  //     needs a private stdin the shared pane can't provide, so that call runs
+  //     on its own separate channel starting from the login directory, blind
+  //     to any cd a prior exec/sudo-exec call made.
+  const sudoExecDescription = SU_ACTIVE
+    ? "Execute a shell command on the remote SSH server. This connection already " +
+      "runs through a long-lived `su -` root shell, so the command runs directly on " +
+      "that shell with NO sudo wrapper at all: the configured sudo password (if any) " +
+      "is not used, and sudoers policy does not apply. cd/export from this call " +
+      "persist in the su shell for later exec/sudo-exec calls."
+    : !TMUX_ATTEMPTED
+      ? "Execute a shell command on the remote SSH server using sudo. Uses the " +
+        "configured sudo password if present, otherwise passwordless sudo. Each call " +
+        "runs in its own shell; nothing persists between calls."
+      : SUDO_PASSWORD_CONFIGURED
+        ? "Execute a shell command on the remote SSH server using the configured sudo " +
+          "password. This takes it off exec's persistent session entirely (sudo -S " +
+          "needs a private stdin the shared session can't provide): it starts from the " +
+          "login directory, not wherever a prior cd left the session, and nothing it " +
+          "does persists either."
+        : "Execute a shell command on the remote SSH server using passwordless sudo. " +
+          "It reads exec's persistent session -- so it sees whatever directory a prior " +
+          "cd left it in -- but never writes it back: its own cd/export do not persist, " +
+          "for this or later calls.";
 
   server.registerTool("sudo-exec", { description: sudoExecDescription,
       inputSchema: z.object({

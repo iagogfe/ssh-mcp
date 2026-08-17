@@ -54,10 +54,24 @@ function preamble(session: string): string {
     // gets tmux's own "duplicate session" error, which `set -eu` turns into a
     // hard failure of the whole script. Attempting the create FIRST removes
     // the gap: the loser's new-session fails harmlessly (2>/dev/null) because
-    // the winner already made the session, and has-session then confirms it
-    // exists either way. A genuine failure (tmux cannot start a session at
-    // all) still fails both commands, so `set -e` still aborts correctly.
-    `tmux new-session -d -s ${session} 2>/dev/null || tmux has-session -t ${session}`,
+    // the winner already made the session, and has-session in the else branch
+    // then confirms it exists either way. A genuine failure (tmux cannot
+    // start a session at all) still fails both commands -- has-session is the
+    // last command run in that case, so `set -e` still aborts on it.
+    //
+    // The `if` form also makes creation OBSERVABLE, not just idempotent: only
+    // the call that actually created a fresh session -- the winner of a
+    // cold-start race, or any call after the session was killed (an operator
+    // running `tmux kill-session`, a host reboot) -- prints a warning. Every
+    // other call, including the losers of that race, stays silent, exactly as
+    // before. Without this, a killed session is recreated and used as if
+    // nothing happened: the next command runs in $HOME instead of wherever a
+    // prior `cd` left it, and reports success.
+    `if tmux new-session -d -s ${session} 2>/dev/null; then`,
+    `  echo "ssh-mcp: started a fresh tmux session; any previous shell state is gone" >&2`,
+    'else',
+    `  tmux has-session -t ${session}`,
+    'fi',
     `D=$(tmux show-environment -t ${session} SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')`,
     'if [ -z "$D" ] || [ ! -d "$D" ]; then',
     '  D=$(mktemp -d "${TMPDIR:-/tmp}/ssh-mcp.XXXXXXXX")',
@@ -250,17 +264,17 @@ const PM_COMMANDS: Record<string, string> = {
 
 export function installHint(pm: string | null, host: string): string {
   const lines = [
-    `tmux não encontrado em ${host}.`,
-    'Sessão persistente (cd/export entre comandos) precisa de tmux no host remoto.',
+    `tmux not found on ${host}.`,
+    'A persistent session (cd/export across calls) needs tmux on the remote host.',
     '',
   ];
   const cmd = pm ? PM_COMMANDS[pm] : undefined;
   if (cmd) {
     lines.push(`  ${cmd}`, '');
   } else {
-    lines.push('  Instale tmux pelo gerenciador de pacotes do host.', '');
+    lines.push("  Install tmux with the host's package manager.", '');
   }
-  lines.push('Ou rode sem estado (comportamento antigo, sem cd/export persistentes): --noTmux');
+  lines.push('Or run stateless (old behavior, no persistent cd/export): --noTmux');
   return lines.join('\n');
 }
 
