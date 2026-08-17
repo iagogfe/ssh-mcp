@@ -94,7 +94,13 @@ function preamble(session: string): string {
     // next command by the `[ ! -d "$D" ]` check above. This runs only when a new
     // workdir is created -- rare, and the same event that produces the litter --
     // because scanning /tmp on every command would cost latency for nothing.
-    `  find "\${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'ssh-mcp.*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true`,
+    // Swept in the directory the workdir was just created in, derived from $D
+    // rather than re-expanding TMPDIR. $D has already passed the quote/space
+    // guard above, so the one line here that deletes anything works from a
+    // value that was validated rather than a raw environment variable.
+    // -maxdepth 1 plus the ssh-mcp.* name keeps the blast radius to siblings of
+    // our own workdir.
+    '  find "$(dirname "$D")" -maxdepth 1 -type d -name \'ssh-mcp.*\' -mtime +7 -exec rm -rf {} + 2>/dev/null || true',
     'fi',
     'find "$D" -type f -mtime +7 -delete 2>/dev/null || true',
   ].join('\n');
