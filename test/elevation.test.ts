@@ -107,11 +107,16 @@ describe('su elevation', () => {
     await conn;
 
     const pending = elevate(m);
+    // Claimed before the clock moves: the 10s timer rejects inside the advance
+    // below, and a handler attached afterwards arrives too late -- Node has
+    // already flagged the rejection as unhandled.
+    const settled = expect(pending).rejects.toThrow(/su elevation timed out/);
+
     await vi.advanceTimersByTimeAsync(9_000);
     expect(hooks.shells[0].written, 'escreveu antes do prompt').toEqual(['su -\n']);
 
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(pending).rejects.toThrow(/su elevation timed out/);
+    await settled;
   });
 
   it('rejects when su reports an authentication failure', async () => {
