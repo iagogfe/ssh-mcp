@@ -111,8 +111,8 @@ describe('buildRunScript', () => {
     expect(s).toContain('while [ ! -s "$D/rc.$T" ]');
     // Adaptive cadence: tight while the command is likely short, backing off to
     // the old 0.1 s so a long job does not fork `sleep` hundreds of times.
-    expect(s).toContain('sleep 0.005');
-    expect(s).toContain('sleep 0.02');
+    expect(s).toContain('sleep 0.002');
+    expect(s).toContain('sleep 0.01');
     expect(s).toContain('sleep 0.1');
     expect(s).not.toContain('while [ ! -f "$D/rc.$T" ]');
   });

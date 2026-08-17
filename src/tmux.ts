@@ -185,8 +185,8 @@ export function buildRunScript(opts: RunScriptOptions): string {
       // a flat 0.01 spent 2.8x the forks of 0.1, this schedule 1.9x, and past
       // ~1.2 s it costs exactly what 0.1 always did.
       'n=0; while [ ! -s "$D/rc.$T" ]; do n=$((n+1));'
-        + ' if [ $n -lt 30 ]; then sleep 0.005;'
-        + ' elif [ $n -lt 80 ]; then sleep 0.02;'
+        + ' if [ $n -lt 50 ]; then sleep 0.002;'
+        + ' elif [ $n -lt 100 ]; then sleep 0.01;'
         + ' else sleep 0.1; fi; done',
       'cat "$D/out.$T"',
       'cat "$D/err.$T" >&2',
