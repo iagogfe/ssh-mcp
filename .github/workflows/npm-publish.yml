@@ -28,7 +28,26 @@ jobs:
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
-          egress-policy: audit
+          # `block`, não `audit`, e só aqui: este é o único job que carrega o
+          # NPM_TOKEN e pode cunhar token OIDC. Audit observa a saída de rede,
+          # não a impede — o que basta num job sem segredo e não basta neste.
+          # Uma dependência comprometida que tente exfiltrar o token bate numa
+          # recusa em vez de num registro.
+          #
+          # Se um destino legítimo faltar nesta lista, o job falha ALTO, no
+          # release, e o endpoint exato sai no relatório do harden-runner da
+          # própria execução. Isso é preferível a um vazamento silencioso.
+          egress-policy: block
+          allowed-endpoints: >
+            registry.npmjs.org:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            uploads.github.com:443
+            nodejs.org:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -38,7 +57,13 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
-      - run: npm ci
+      # --ignore-scripts: este job tem `id-token: write`, então um postinstall
+      # de qualquer dependência poderia cunhar um token OIDC de procedência.
+      # Quatro pacotes do lockfile declaram install script (cpu-features,
+      # fsevents, ssh2, esbuild) e nenhum é necessário aqui: os passos
+      # seguintes são tsc e shx, ambos JavaScript puro. A suíte de testes, que
+      # é quem precisa do esbuild, roda no CI, não neste job.
+      - run: npm ci --ignore-scripts
       - name: Type check
         run: npx tsc --noEmit
       - name: Build

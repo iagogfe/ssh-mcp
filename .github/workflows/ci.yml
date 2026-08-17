@@ -36,19 +36,15 @@ jobs:
       # A suíte fala com um sshd de verdade: os testes sobem o servidor MCP e
       # executam comandos remotos, então um mock não provaria nada.
       sshd:
-        image: lscr.io/linuxserver/openssh-server:latest
+        # Por digest, como toda action acima: `:latest` é mutável, e uma imagem
+        # de serviço executa código no runner igual a uma action. Atualizar =
+        # trocar o digest e o comentário junto.
+        image: ghcr.io/linuxserver/openssh-server@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c # latest em 2026-08-17
         env:
           USER_NAME: test
           PASSWORD_ACCESS: "true"
           USER_PASSWORD: secret
           SUDO_ACCESS: "true"
-          # A suíte de tmux (test/tmux-session.test.ts) precisa de tmux no host
-          # remoto, e um teste específico exercita um pane rodando dash (não
-          # só bash) — dois shells de verdade, não emulados. O mod instala no
-          # primeiro boot — daí o passo "Esperar o tmux" abaixo, separado do
-          # health-check de porta.
-          DOCKER_MODS: linuxserver/mods:universal-package-install
-          INSTALL_PACKAGES: tmux|dash
         ports:
           - 2222:2222
         options: >-
@@ -95,24 +91,30 @@ jobs:
           echo "::error::sshd não respondeu na porta 2222"
           exit 1
 
-      - name: Esperar o tmux e o dash
-        # A porta 2222 sobe antes do DOCKER_MODS terminar de instalar os
-        # pacotes (mod roda no primeiro boot) — checar só a porta daria flake,
-        # não falha limpa. `docker exec` fala direto com o container do
-        # serviço. tmux e dash instalam juntos (mesmo INSTALL_PACKAGES), mas
-        # checar os dois é mais barato que assumir isso.
+      - name: Instalar tmux e dash no serviço
+        # A suíte de tmux (test/tmux-session.test.ts) precisa de tmux no host
+        # remoto, e um teste exercita um pane rodando dash — dois shells de
+        # verdade, não emulados.
+        #
+        # Instalados aqui, e não por DOCKER_MODS: aquele mod é uma segunda
+        # imagem de terceiro, sem digest documentado, que baixa e instala
+        # pacotes no primeiro boot do container. Isso punha código não pinado
+        # rodando no CI de um repositório que pina toda action por SHA, e a
+        # instalação acabar DEPOIS da porta 2222 abrir era a origem do
+        # health-check duplo que existia aqui. `apk add` é síncrono: quando
+        # este passo termina, está pronto.
         run: |
-          cid=$(docker ps --filter ancestor=lscr.io/linuxserver/openssh-server:latest --format '{{.ID}}' | head -n1)
+          set -euo pipefail
+          # Casado pelo nome da imagem, não por `ancestor=<tag>`: a imagem
+          # agora é referenciada por digest.
+          cid=$(docker ps --format '{{.ID}} {{.Image}}' | grep openssh-server | awk '{print $1}' | head -n1)
           if [ -z "$cid" ]; then
             echo "::error::não encontrei o container do serviço sshd"
             exit 1
           fi
-          for i in {1..60}; do
-            docker exec "$cid" tmux -V 2>/dev/null && docker exec "$cid" dash -c 'echo ok' 2>/dev/null && echo "tmux e dash prontos" && exit 0
-            sleep 2
-          done
-          echo "::error::tmux e/ou dash não ficaram prontos no serviço sshd"
-          exit 1
+          docker exec "$cid" apk add --no-cache tmux dash
+          docker exec "$cid" tmux -V
+          docker exec "$cid" dash -c 'echo dash ok'
 
       - name: Testes
         env:
