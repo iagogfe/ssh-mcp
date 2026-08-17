@@ -29,6 +29,9 @@ function callExec(command: string, extraArgs: string[] = []): Promise<JsonRpcRes
         '--insecureHostKey',
         '--port=2222',
         '--timeout=1500',
+        // Isolate this file's tmux session from every other spawn-based test
+        // file sharing the same live fixture (see description.test.ts).
+        '--tmuxSession=ssh-mcp-maxchars',
         ...extraArgs,
       ],
       {

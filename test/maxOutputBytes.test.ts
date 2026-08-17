@@ -6,7 +6,9 @@ const testServerPath = join(process.cwd(), 'build', 'index.js');
 const clientMapPath = join(process.cwd(), 'test', 'fixtures', 'client-map.md');
 
 function callExec(command: string, extraArgs: string[] = []): Promise<any> {
-  const args = [testServerPath, '--insecureHostKey', '--port=2222', '--timeout=20000', ...extraArgs];
+  // --tmuxSession isolates this file from every other spawn-based test file
+  // sharing the same live fixture (see description.test.ts).
+  const args = [testServerPath, '--insecureHostKey', '--port=2222', '--timeout=20000', '--tmuxSession=ssh-mcp-maxbytes', ...extraArgs];
   return new Promise((resolve, reject) => {
     const child = spawn('node', args, {
       stdio: ['pipe', 'pipe', 'pipe'],

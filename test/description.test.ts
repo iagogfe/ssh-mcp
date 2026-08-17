@@ -27,6 +27,11 @@ function runMcpCommands(
     '--insecureHostKey',
     '--port=2222',
     '--timeout=60000',
+    // Isolate this file's default-mode exec calls from every other spawn-based
+    // test file's use of the shared 'ssh-mcp' tmux session on the same live
+    // fixture; without this, parallel vitest workers race to create/attach the
+    // same session (e.g. tmux's own "duplicate session" error).
+    '--tmuxSession=ssh-mcp-description',
     ...extraArgs,
   ];
 

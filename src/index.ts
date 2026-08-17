@@ -17,6 +17,7 @@ import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseMaxBytes } from './output.js';
 import {
   DEFAULT_TMUX_SESSION,
+  assertSessionName,
   buildInterruptScript,
   buildJobStatusScript,
   buildProbeScript,
@@ -95,6 +96,12 @@ const SUPASSWORD = resolveSecret(argvConfig.suPassword, process.env.SSH_MCP_SU_P
 const SUDOPASSWORD = resolveSecret(argvConfig.sudoPassword, process.env.SSH_MCP_SUDO_PASSWORD);
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key ?? process.env.SSH_MCP_KEY_PATH;
+// --noTmux forces the old stateless per-command exec path even when the host
+// has tmux available. --tmuxSession picks which session name to attach/create,
+// so multiple independent server instances can share a host without stepping
+// on each other's persistent shell.
+const NO_TMUX = argvConfig.noTmux !== undefined || process.env.SSH_MCP_NO_TMUX === '1';
+const TMUX_SESSION = argvConfig.tmuxSession ?? process.env.SSH_MCP_TMUX_SESSION ?? DEFAULT_TMUX_SESSION;
 
 // Host key verification settings (defends against man-in-the-middle attacks).
 // By default the server verifies the host key against the user's known_hosts file
@@ -147,6 +154,9 @@ function validateConfig(config: Record<string, string | null>) {
   const hasClientMap = !!(config.clientMap ?? process.env.SSH_MCP_CLIENT_MAP);
   if (!hasHost && !hasClientMap) {
     errors.push('Missing target: pass --host for a single server, or --clientMap for an inventory');
+  }
+  if (config.tmuxSession !== undefined && config.tmuxSession !== null) {
+    try { assertSessionName(config.tmuxSession); } catch (e: any) { errors.push(e.message); }
   }
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
@@ -702,6 +712,8 @@ async function getConnectionManager(
         hostFingerprint: HOST_FINGERPRINT,
         knownHostsPath: KNOWN_HOSTS_PATH,
         insecureHostKey: INSECURE_HOST_KEY,
+        noTmux: NO_TMUX,
+        tmuxSession: TMUX_SESSION,
       };
 
       if (PASSWORD !== undefined) {
@@ -742,19 +754,51 @@ const server = new McpServer(
   },
 );
 
-server.registerTool("exec", { description: "Execute a shell command on the remote SSH server and return the output.", inputSchema: z.object({
+server.registerTool("exec", { description:
+      "Execute a shell command on the remote SSH server and return its output. " +
+      "Shell state persists between calls: cd changes the working directory and " +
+      "export'd variables stay set for later commands in this same session -- no " +
+      "need to chain commands with && or cd back into place every time. " +
+      "For long-running work, pass detach: true to get a jobId back immediately " +
+      "instead of blocking, then poll it with job_status.",
+      inputSchema: z.object({
         client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
         command: z.string().describe("Shell command to execute on the remote SSH server"),
         description: z.string().optional().describe("Optional description of what this command will do"),
+        detach: z.boolean().optional().describe("Run in the background and return a jobId immediately instead of waiting; collect the result with job_status. Only available in the persistent tmux session (not with --suPassword or --noTmux)."),
         maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables. Defaults to server config."),
-      }) }, async ({ client, command, description, maxBytes }) => {
+      }) }, async ({ client, command, description, detach, maxBytes }) => {
         try {
           const { manager } = await getConnectionManager(client, false);
           const sanitizedCommand = sanitizeCommand(command);
 
           // Ensure connection is active (reconnect if needed)
           await manager.ensureConnected();
+          const mode = await ensureMode(manager);
 
+          // Append description as comment if provided
+          const commandWithDescription = description
+            ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
+            : sanitizedCommand;
+
+          if (mode === 'tmux') {
+            return await runInTmux(manager, commandWithDescription, {
+              kind: 'exec',
+              detach,
+              maxBytes: resolveMaxBytes(maxBytes),
+            });
+          }
+
+          // detach only makes sense against the persistent tmux session: su and
+          // stateless mode have no session to poll a job's progress in later.
+          if (detach) {
+            throw new ProtocolError(
+              ProtocolErrorCode.InvalidParams,
+              'detach requires tmux mode; it is unavailable with --suPassword or --noTmux',
+            );
+          }
+
+          // su and stateless modes keep the pre-tmux behavior verbatim.
           // If a suPassword was provided, explicitly wait for elevation before executing.
           // This is critical: ensureElevated is idempotent and will return immediately if
           // already elevated, so this ensures we have a su shell before we try to use it.
@@ -771,11 +815,6 @@ server.registerTool("exec", { description: "Execute a shell command on the remot
             }
           }
 
-          // Append description as comment if provided
-          const commandWithDescription = description
-            ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
-            : sanitizedCommand;
-
           const result = await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
           return result;
         } catch (err: any) {
@@ -787,7 +826,12 @@ server.registerTool("exec", { description: "Execute a shell command on the remot
 
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
-  server.registerTool("sudo-exec", { description: "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.", inputSchema: z.object({
+  server.registerTool("sudo-exec", { description:
+      "Execute a shell command on the remote SSH server using sudo. Will use sudo " +
+      "password if provided, otherwise assumes passwordless sudo. With passwordless " +
+      "sudo, shell state persists between calls the same way exec's does (cd, " +
+      "export'd variables); a sudo password forces a one-off, stateless invocation.",
+      inputSchema: z.object({
               client: z.string().optional().describe('Client name from the configured inventory. Omit when the server is pinned to a single host.'),
               command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
               description: z.string().optional().describe("Optional description of what this command will do"),
@@ -798,6 +842,7 @@ if (!DISABLE_SUDO) {
                 const sanitizedCommand = sanitizeCommand(command);
 
                 await manager.ensureConnected();
+                const mode = await ensureMode(manager);
 
                 // If suPassword or sudoPassword were provided on this call but the
                 // existing connection manager was created earlier without them,
@@ -817,6 +862,16 @@ if (!DISABLE_SUDO) {
                 const commandWithDescription = description
                   ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
                   : sanitizedCommand;
+
+                // In tmux mode a passwordless sudo runs inside the session, so it
+                // inherits the working directory. With a password it cannot: sudo -S
+                // needs a private stdin, and the session's stdin is the shared pane.
+                if (mode === 'tmux' && !sudoPassword) {
+                  return await runInTmux(manager, commandWithDescription, {
+                    kind: 'sudo',
+                    maxBytes: resolveMaxBytes(maxBytes),
+                  });
+                }
 
                 // Already root through the persistent `su -` shell: run the command as
                 // is. Wrapping it in `sudo -S` there would hang — that shell branch has
@@ -845,6 +900,36 @@ if (!DISABLE_SUDO) {
                 throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
               }
             });
+}
+
+// job_status is only meaningful in tmux mode, which is also the only mode
+// that can produce a jobId (via exec's detach: true), so the tool is hidden
+// entirely when tmux is disabled or su mode is active. The su check mirrors
+// the SUPASSWORD null/undefined distinction used above: a bare --suPassword
+// flag resolves to null and does NOT enable su mode, so only a non-null,
+// non-undefined value should hide the tool.
+const SU_ACTIVE = SUPASSWORD !== null && SUPASSWORD !== undefined;
+if (!NO_TMUX && !SU_ACTIVE) {
+  server.registerTool("job_status", { description:
+      "Check on a background job started with exec(detach: true). While the job " +
+      "is still running this returns its elapsed time and the tail of its output " +
+      "so far; once it has finished it returns the full output and exit code, and " +
+      "frees the job's resources on the remote host.",
+      inputSchema: z.object({
+        jobId: z.string().describe("The jobId returned by exec with detach: true"),
+        client: z.string().optional().describe('Client whose session holds the job. Omit when the server is pinned to a single host.'),
+        maxBytes: z.number().int().optional().describe("Max output bytes before head+tail truncation; 0 disables."),
+      }) }, async ({ jobId, client, maxBytes }) => {
+        try {
+          const { manager } = await getConnectionManager(client, false);
+          await manager.ensureConnected();
+          await ensureMode(manager);
+          return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes));
+        } catch (err: any) {
+          if (err instanceof ProtocolError) throw err;
+          throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+        }
+      });
 }
 
 // New function that uses persistent connection

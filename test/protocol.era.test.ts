@@ -35,7 +35,7 @@ describe('protocol era negotiation', () => {
     try {
       expect(client.getProtocolEra()).toBe('modern');
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name).sort()).toEqual(['exec', 'sudo-exec']);
+      expect(tools.map((t) => t.name).sort()).toEqual(['exec', 'job_status', 'sudo-exec']);
     } finally {
       await client.close();
     }
