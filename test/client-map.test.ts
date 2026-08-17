@@ -102,4 +102,21 @@ describe('Planetfone client inventory', () => {
       expect(message.split(/\n/).filter((line) => line.includes('Example Client B'))).toHaveLength(0);
     }
   });
+
+  it('rejects a blank client name before searching for it', () => {
+    // Normalisation collapses whitespace, so a name of only spaces is empty and
+    // would otherwise match nothing with a confusing "not found" instead.
+    expect(() => resolveClientHost([{ name: 'Alfa', hosts: ['a.internal'] }], '   '))
+      .toThrow(/cannot be empty/i);
+  });
+
+  it('suggests a client whose name merely contains the query', () => {
+    const clients = [
+      { name: 'Rede Sul Telecom', hosts: ['sul.internal'] },
+      { name: 'Outro Cliente', hosts: ['outro.internal'] },
+    ];
+    // "Sul" neither starts the name nor is started by it -- it is the substring
+    // rank, the weaker of the two suggestion tiers.
+    expect(() => resolveClientHost(clients, 'Sul')).toThrow(/Suggestions: Rede Sul Telecom/);
+  });
 });
