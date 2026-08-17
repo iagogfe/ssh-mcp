@@ -100,6 +100,18 @@ const KEY = argvConfig.key ?? process.env.SSH_MCP_KEY_PATH;
 // has tmux available. --tmuxSession picks which session name to attach/create,
 // so multiple independent server instances can share a host without stepping
 // on each other's persistent shell.
+// Concurrent tool calls each open their own SSH channel, and sshd caps that with
+// MaxSessions -- 10 by default, and the excess is refused with a bare
+// "Channel open failure". Queueing past a client-side cap costs nothing: in tmux
+// mode every command serialises through the one pane anyway, so the extra
+// channels would only queue server-side. Default 8 leaves headroom under the
+// usual 10 for the elevation shell and an interrupt. Lower it for a host with a
+// stricter MaxSessions.
+const MAX_CONCURRENT = (() => {
+  const raw = argvConfig.maxConcurrent ?? process.env.SSH_MCP_MAX_CONCURRENT;
+  const n = typeof raw === 'string' ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 8;
+})();
 const NO_TMUX = argvConfig.noTmux !== undefined || process.env.SSH_MCP_NO_TMUX === '1';
 const TMUX_SESSION = argvConfig.tmuxSession ?? process.env.SSH_MCP_TMUX_SESSION ?? DEFAULT_TMUX_SESSION;
 
@@ -328,6 +340,7 @@ export interface SSHConfig {
   hostFingerprint?: string;   // Pinned host key fingerprint (SHA256 or MD5)
   knownHostsPath?: string;    // Path to known_hosts (defaults to ~/.ssh/known_hosts)
   insecureHostKey?: boolean;  // Disable host key verification (vulnerable to MITM)
+  maxConcurrent?: number;   // Max SSH channels open at once for this destination
   noTmux?: boolean;           // Force the stateless per-command exec path
   tmuxSession?: string;       // tmux session name (defaults to 'ssh-mcp')
 }
@@ -387,6 +400,11 @@ export class SSHConnectionManager {
   // `conn._sock` says nothing about whether the protocol is ready: a caller
   // trusting it during the handshake window sends CHANNEL_OPEN before KEXINIT
   // and the server drops the connection.
+  // Channel budget for this destination. `waiters` are callers parked until a
+  // slot frees; the acquire loop re-checks after waking so two of them can never
+  // be admitted into the same slot.
+  private activeChannelCount = 0;
+  private readonly channelWaiters: Array<() => void> = [];
   private isReady = false;
   private tmuxMode: TmuxMode | null = null;
   private modePromise: Promise<TmuxMode> | null = null;
@@ -530,6 +548,26 @@ export class SSHConnectionManager {
     });
 
     return this.connectionPromise;
+  }
+
+  maxConcurrentChannels(): number {
+    return this.sshConfig.maxConcurrent ?? MAX_CONCURRENT;
+  }
+
+  activeChannels(): number {
+    return this.activeChannelCount;
+  }
+
+  async acquireChannel(): Promise<void> {
+    while (this.activeChannelCount >= this.maxConcurrentChannels()) {
+      await new Promise<void>((resolve) => this.channelWaiters.push(resolve));
+    }
+    this.activeChannelCount += 1;
+  }
+
+  releaseChannel(): void {
+    if (this.activeChannelCount > 0) this.activeChannelCount -= 1;
+    this.channelWaiters.shift()?.();
   }
 
   isConnected(): boolean {
@@ -1029,12 +1067,59 @@ if (TMUX_ATTEMPTED) {
 }
 
 // New function that uses persistent connection
+// A refused channel open is transient and, crucially, means the command never
+// reached the host: sshd rejects the session before anything runs, so a retry
+// cannot double-execute. Nothing else here earns that guarantee -- a timeout or
+// a dropped connection may well have left the command running -- so the match is
+// deliberately narrow.
+export function isRetryableChannelError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return /channel open failure/i.test(msg);
+}
+
 export async function execSshCommandWithConnection(
   manager: SSHConnectionManager,
   command: string,
   stdin?: string,
   maxBytes: number = 8192,
   timeoutMs: number = DEFAULT_TIMEOUT,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+
+  // Wait for a channel slot before opening one. Without this, a burst of
+  // parallel tool calls opens a channel each and sshd refuses everything past
+  // MaxSessions with a bare "Channel open failure: open failed" -- an error the
+  // agent can do nothing with, for work that would have queued anyway.
+  // The cap keeps us under MaxSessions in steady state, but sshd does not free a
+  // slot the instant our side closes a channel, so a burst can still be refused
+  // mid-churn. Measured on a live host: with the cap alone, 20 concurrent calls
+  // still lost 2 and 50 lost 2, tracking churn rather than count.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await manager.acquireChannel();
+    try {
+      return await runOnChannel(manager, command, stdin, maxBytes, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableChannelError(err)) throw err;
+    } finally {
+      manager.releaseChannel();
+    }
+    // Released the slot before backing off, so a waiter can use it meanwhile.
+    await new Promise((r) => setTimeout(r, 40 * (attempt + 1)));
+  }
+  throw new ProtocolError(
+    ProtocolErrorCode.InternalError,
+    `SSH channel refused after 5 attempts (${lastErr instanceof Error ? lastErr.message : String(lastErr)}). `
+    + 'The host is at its MaxSessions limit; lower --maxConcurrent to stay under it.',
+  );
+}
+
+function runOnChannel(
+  manager: SSHConnectionManager,
+  command: string,
+  stdin: string | undefined,
+  maxBytes: number,
+  timeoutMs: number,
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
