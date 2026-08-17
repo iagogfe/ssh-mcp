@@ -380,7 +380,16 @@ export class SSHConnectionManager {
   // tmuxSession). Either can hand a later command a stale rc/out/err file
   // left by an old, never-collected run under that token.
   private readonly tokenNonce = randomBytes(4).toString('hex');
+  // True only while the SSH session is actually usable — from the moment the
+  // handshake completes (and su elevation, when configured) until the
+  // connection ends. `connect()` assigns `this.conn` synchronously inside its
+  // promise executor and ssh2 creates the socket immediately, so a live
+  // `conn._sock` says nothing about whether the protocol is ready: a caller
+  // trusting it during the handshake window sends CHANNEL_OPEN before KEXINIT
+  // and the server drops the connection.
+  private isReady = false;
   private tmuxMode: TmuxMode | null = null;
+  private modePromise: Promise<TmuxMode> | null = null;
   private probe: TmuxProbe | null = null;
 
   constructor(config: SSHConfig) {
@@ -404,6 +413,7 @@ export class SSHConnectionManager {
   // Cleared whenever the connection drops so a reconnect re-evaluates the host.
   resetMode(): void {
     this.tmuxMode = null;
+    this.modePromise = null;
     this.probe = null;
   }
 
@@ -415,16 +425,33 @@ export class SSHConnectionManager {
   // without an SSH server, and so src/tmux.ts can remain free of I/O.
   async resolveMode(runProbe: (script: string) => Promise<string>): Promise<TmuxMode> {
     if (this.tmuxMode) return this.tmuxMode;
+    // Concurrent callers share the in-flight probe, the same way connect()
+    // shares connectionPromise. Without this, N cold callers each open a probe
+    // channel on top of their own command channel: 2N channels against sshd's
+    // MaxSessions (10 by default), and the excess comes back as
+    // "Channel open failure: open failed".
+    if (this.modePromise) return this.modePromise;
 
-    if (this.sshConfig.suPassword) {
-      this.tmuxMode = 'su';
-    } else if (this.sshConfig.noTmux) {
-      this.tmuxMode = 'stateless';
-    } else {
-      this.probe = parseProbeOutput(await runProbe(buildProbeScript()));
-      this.tmuxMode = this.probe.tmux ? 'tmux' : 'blocked';
+    this.modePromise = (async () => {
+      if (this.sshConfig.suPassword) {
+        this.tmuxMode = 'su';
+      } else if (this.sshConfig.noTmux) {
+        this.tmuxMode = 'stateless';
+      } else {
+        this.probe = parseProbeOutput(await runProbe(buildProbeScript()));
+        this.tmuxMode = this.probe.tmux ? 'tmux' : 'blocked';
+      }
+      return this.tmuxMode;
+    })();
+
+    try {
+      return await this.modePromise;
+    } finally {
+      // Cleared either way: on success tmuxMode is the cache from here on, and
+      // on failure the next caller must be free to probe again rather than
+      // inherit a rejected promise forever.
+      this.modePromise = null;
     }
-    return this.tmuxMode;
   }
 
   async connect(): Promise<void> {
@@ -445,6 +472,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.isReady = false;
         this.resetMode();
         reject(new ProtocolError(ProtocolErrorCode.InternalError, 'SSH connection timeout'));
       }, 30000); // 30 seconds connection timeout
@@ -466,6 +494,7 @@ export class SSHConnectionManager {
           }
         }
 
+        this.isReady = true;
         resolve();
       });
 
@@ -474,6 +503,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.isReady = false;
         this.resetMode();
         reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
       });
@@ -483,6 +513,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.isReady = false;
         this.resetMode();
       });
 
@@ -491,6 +522,7 @@ export class SSHConnectionManager {
         this.conn = null;
         this.isConnecting = false;
         this.connectionPromise = null;
+        this.isReady = false;
         this.resetMode();
       });
 
@@ -501,7 +533,7 @@ export class SSHConnectionManager {
   }
 
   isConnected(): boolean {
-    return this.conn !== null && (this.conn as any)._sock && !(this.conn as any)._sock.destroyed;
+    return this.isReady && this.conn !== null && (this.conn as any)._sock && !(this.conn as any)._sock.destroyed;
   }
 
   // Whether commands currently run inside the persistent root shell established by
@@ -659,6 +691,7 @@ export class SSHConnectionManager {
       this.conn.end();
       this.conn = null;
     }
+    this.isReady = false;
     this.resetMode();
   }
 }
