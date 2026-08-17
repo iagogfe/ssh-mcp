@@ -59,15 +59,7 @@ describe('Planetfone client inventory', () => {
   it('resolves an exact normalized client name to its first host', () => {
     const clients = parsePlanetfone4Hosts(markdown);
 
-    expect(resolveClientHost(clients, 'Example Client')).toEqual({
-      clientName: 'Example Client',
-      host: 'fixture-client-004.example.com',
-      hosts: [
-        'fixture-client-004.example.com',
-        'fixture-client-005.example.com',
-        '192.0.2.10',
-      ],
-    });
+    expect(resolveClientHost(clients, 'Example Client')).toBe('fixture-client-004.example.com');
   });
 
   it('rejects ambiguous client names after normalization', () => {

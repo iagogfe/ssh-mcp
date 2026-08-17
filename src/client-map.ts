@@ -5,12 +5,6 @@ export interface PlanetfoneClient {
   hosts: string[];
 }
 
-export interface ClientResolution {
-  clientName: string;
-  host: string;
-  hosts: string[];
-}
-
 export class ClientResolutionError extends Error {
   constructor(message: string) {
     super(message);
@@ -93,10 +87,12 @@ export function loadPlanetfone4Hosts(filePath: string): PlanetfoneClient[] {
   return parsePlanetfone4Hosts(markdown);
 }
 
+// Returns the client's first host. The client's own name and its remaining
+// hosts were once returned alongside it and never read by anyone.
 export function resolveClientHost(
   clients: readonly PlanetfoneClient[],
   query: string,
-): ClientResolution {
+): string {
   const normalizedQuery = normalizeClientName(query);
   if (!normalizedQuery) {
     throw new ClientResolutionError('Client name cannot be empty');
@@ -109,12 +105,9 @@ export function resolveClientHost(
     );
   }
 
-  const [match] = matches;
-  if (match) {
-    const [host] = match.hosts;
-    if (host) {
-      return { clientName: match.name, host, hosts: [...match.hosts] };
-    }
+  const [host] = matches[0]?.hosts ?? [];
+  if (host) {
+    return host;
   }
 
   const suggestions = clients

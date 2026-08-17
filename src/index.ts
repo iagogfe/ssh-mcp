@@ -753,7 +753,7 @@ function resolveTargetHost(client: string | undefined): string {
     // client-map.ts stays free of any MCP import, so its own error type is
     // translated here rather than thrown across the protocol boundary raw.
     try {
-      return resolveClientHost(getConfiguredClients(), client).host;
+      return resolveClientHost(getConfiguredClients(), client);
     } catch (err) {
       if (err instanceof ClientResolutionError) {
         throw new ProtocolError(ProtocolErrorCode.InvalidParams, err.message);
