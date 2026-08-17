@@ -9,10 +9,11 @@ import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import {
+  ClientResolutionError,
   loadPlanetfone4Hosts,
+  resolveClientHost,
   type PlanetfoneClient,
 } from './client-map.js';
-import { resolveClientForProtocol } from './client-protocol.js';
 import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseMaxBytes } from './output.js';
 import {
@@ -749,7 +750,16 @@ function getConfiguredClients(): PlanetfoneClient[] {
 // configured at once, in which case --host is the default target.
 function resolveTargetHost(client: string | undefined): string {
   if (client !== undefined && client !== '') {
-    return resolveClientForProtocol(getConfiguredClients(), client).host;
+    // client-map.ts stays free of any MCP import, so its own error type is
+    // translated here rather than thrown across the protocol boundary raw.
+    try {
+      return resolveClientHost(getConfiguredClients(), client).host;
+    } catch (err) {
+      if (err instanceof ClientResolutionError) {
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams, err.message);
+      }
+      throw err;
+    }
   }
   if (HOST) return HOST;
   throw new ProtocolError(
