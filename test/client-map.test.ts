@@ -59,15 +59,7 @@ describe('Planetfone client inventory', () => {
   it('resolves an exact normalized client name to its first host', () => {
     const clients = parsePlanetfone4Hosts(markdown);
 
-    expect(resolveClientHost(clients, 'Example Client')).toEqual({
-      clientName: 'Example Client',
-      host: 'fixture-client-004.example.com',
-      hosts: [
-        'fixture-client-004.example.com',
-        'fixture-client-005.example.com',
-        '192.0.2.10',
-      ],
-    });
+    expect(resolveClientHost(clients, 'Example Client')).toBe('fixture-client-004.example.com');
   });
 
   it('rejects ambiguous client names after normalization', () => {
@@ -109,5 +101,22 @@ describe('Planetfone client inventory', () => {
       expect(message).not.toMatch(/senha|password|usuario|user|secret/i);
       expect(message.split(/\n/).filter((line) => line.includes('Example Client B'))).toHaveLength(0);
     }
+  });
+
+  it('rejects a blank client name before searching for it', () => {
+    // Normalisation collapses whitespace, so a name of only spaces is empty and
+    // would otherwise match nothing with a confusing "not found" instead.
+    expect(() => resolveClientHost([{ name: 'Alfa', hosts: ['a.internal'] }], '   '))
+      .toThrow(/cannot be empty/i);
+  });
+
+  it('suggests a client whose name merely contains the query', () => {
+    const clients = [
+      { name: 'Rede Sul Telecom', hosts: ['sul.internal'] },
+      { name: 'Outro Cliente', hosts: ['outro.internal'] },
+    ];
+    // "Sul" neither starts the name nor is started by it -- it is the substring
+    // rank, the weaker of the two suggestion tiers.
+    expect(() => resolveClientHost(clients, 'Sul')).toThrow(/Suggestions: Rede Sul Telecom/);
   });
 });

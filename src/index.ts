@@ -9,12 +9,13 @@ import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import {
+  ClientResolutionError,
   loadPlanetfone4Hosts,
+  resolveClientHost,
   type PlanetfoneClient,
 } from './client-map.js';
-import { resolveClientForProtocol } from './client-protocol.js';
 import { DestinationManagerCache } from './connection-manager-cache.js';
-import { formatCommandResult, parseMaxBytes } from './output.js';
+import { formatCommandResult, parseLimit } from './output.js';
 import {
   DEFAULT_TMUX_SESSION,
   assertSessionName,
@@ -62,14 +63,6 @@ function resolveSecret(flag: string | null | undefined, env: string | undefined)
   return undefined;
 }
 
-export function resolveCredential(
-  flag: string | null | undefined,
-  legacy: string | undefined,
-  official: string | undefined,
-): string | null | undefined {
-  return resolveSecret(flag, official ?? legacy);
-}
-
 export function shouldLoadPrivateKey(
   password: string | undefined,
   keyPath: string | undefined,
@@ -87,11 +80,7 @@ export const HOST = argvConfig.host ?? process.env.SSH_MCP_HOST;
 // the process in, which the operator does not control.
 export const CLIENT_MAP_PATH = argvConfig.clientMap ?? process.env.SSH_MCP_CLIENT_MAP;
 export const USER = argvConfig.user ?? process.env.SSH_MCP_USER;
-export const PASSWORD = resolveCredential(
-  argvConfig.password,
-  undefined,
-  process.env.SSH_MCP_PASSWORD,
-) ?? undefined;
+export const PASSWORD = resolveSecret(argvConfig.password, process.env.SSH_MCP_PASSWORD) ?? undefined;
 const SUPASSWORD = resolveSecret(argvConfig.suPassword, process.env.SSH_MCP_SU_PASSWORD);
 const SUDOPASSWORD = resolveSecret(argvConfig.sudoPassword, process.env.SSH_MCP_SUDO_PASSWORD);
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
@@ -124,27 +113,11 @@ const HOST_FINGERPRINT = argvConfig.hostFingerprint ?? process.env.SSH_MCP_HOST_
 const KNOWN_HOSTS_PATH = argvConfig.knownHosts ?? process.env.SSH_MCP_KNOWN_HOSTS ?? join(homedir(), '.ssh', 'known_hosts');
 const INSECURE_HOST_KEY = argvConfig.insecureHostKey !== undefined || process.env.SSH_MCP_INSECURE_HOST_KEY === '1';
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
-// Max characters configuration:
-// - Default: 1000 characters
-// - When set via --maxChars:
-//   * a positive integer enforces that limit
-//   * 0 or a negative value disables the limit (no max)
-//   * the string "none" (case-insensitive) disables the limit (no max)
-const MAX_CHARS_RAW = argvConfig.maxChars;
-const MAX_CHARS = (() => {
-  if (typeof MAX_CHARS_RAW === 'string') {
-    const lowered = MAX_CHARS_RAW.toLowerCase();
-    if (lowered === 'none') return Infinity;
-    const parsed = parseInt(MAX_CHARS_RAW);
-    if (isNaN(parsed)) return 1000;
-    if (parsed <= 0) return Infinity;
-    return parsed;
-  }
-  return 1000;
-})();
+// Longest accepted command, in characters. 0/none disables. Default 1000.
+const MAX_CHARS = parseLimit(argvConfig.maxChars, 1000);
 
 // Output truncation budget (bytes per stream). 0/none disables. Default 8 KB.
-const MAX_OUTPUT_BYTES = parseMaxBytes(
+const MAX_OUTPUT_BYTES = parseLimit(
   argvConfig.maxOutputBytes ?? process.env.SSH_MCP_MAX_OUTPUT_BYTES,
   8192,
 );
@@ -193,7 +166,7 @@ export function sanitizeCommand(command: string): string {
   }
 
   // Length check
-  if (Number.isFinite(MAX_CHARS) && trimmedCommand.length > (MAX_CHARS as number)) {
+  if (MAX_CHARS > 0 && trimmedCommand.length > MAX_CHARS) {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,
       `Command is too long (max ${MAX_CHARS} characters)`
@@ -208,12 +181,6 @@ function sanitizePassword(password: string | undefined): string | undefined {
   // minimal check, do not log or modify content
   if (password.length === 0) return undefined;
   return password;
-}
-
-// Escape command for use in shell contexts (like pkill)
-export function escapeCommandForShell(command: string): string {
-  // Replace single quotes with escaped single quotes
-  return command.replace(/'/g, "'\"'\"'");
 }
 
 // Strip CR/LF (and collapse whitespace) from a description before appending it as
@@ -755,7 +722,16 @@ function getConfiguredClients(): PlanetfoneClient[] {
 // configured at once, in which case --host is the default target.
 function resolveTargetHost(client: string | undefined): string {
   if (client !== undefined && client !== '') {
-    return resolveClientForProtocol(getConfiguredClients(), client).host;
+    // client-map.ts stays free of any MCP import, so its own error type is
+    // translated here rather than thrown across the protocol boundary raw.
+    try {
+      return resolveClientHost(getConfiguredClients(), client);
+    } catch (err) {
+      if (err instanceof ClientResolutionError) {
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams, err.message);
+      }
+      throw err;
+    }
   }
   if (HOST) return HOST;
   throw new ProtocolError(
@@ -1331,87 +1307,6 @@ export async function jobStatus(
     { stdout: status.stdout, stderr: status.stderr, exitCode: status.exitCode },
     maxBytes,
   );
-}
-
-// Keep the old function for backward compatibility (used in tests)
-export async function execSshCommand(sshConfig: any, command: string, stdin?: string, maxBytes: number = 8192): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
-  return new Promise((resolve, reject) => {
-    const conn = new Client();
-    let timeoutId: NodeJS.Timeout;
-    let isResolved = false;
-
-    // Set up timeout
-    timeoutId = setTimeout(() => {
-      if (!isResolved) {
-        isResolved = true;
-        // Try to abort the running command before closing connection
-        const abortTimeout = setTimeout(() => {
-          // If abort command itself times out, force close connection
-          conn.end();
-        }, 5000); // 5 second timeout for abort command
-
-        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err: Error | undefined, abortStream: ClientChannel | undefined) => {
-          if (abortStream) {
-            abortStream.on('close', () => {
-              clearTimeout(abortTimeout);
-              conn.end();
-            });
-          } else {
-            clearTimeout(abortTimeout);
-            conn.end();
-          }
-        });
-        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
-      }
-    }, DEFAULT_TIMEOUT);
-
-    conn.on('ready', () => {
-      conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
-        if (err) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH exec error: ${err.message}`));
-          }
-          conn.end();
-          return;
-        }
-        // If stdin provided, write it to the stream and end stdin
-        if (stdin && stdin.length > 0) {
-          try {
-            stream.write(stdin);
-          } catch (e) {
-            // ignore
-          }
-        }
-        try { stream.end(); } catch (e) { /* ignore */ }
-        let stdout = '';
-        let stderr = '';
-        stream.on('close', (code: number | null, signal: string | null) => {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            conn.end();
-            resolve(formatCommandResult({ stdout, stderr, exitCode: code, signal }, maxBytes));
-          }
-        });
-        stream.on('data', (data: Buffer) => {
-          stdout += data.toString();
-        });
-        stream.stderr.on('data', (data: Buffer) => {
-          stderr += data.toString();
-        });
-      });
-    });
-    conn.on('error', (err: Error) => {
-      if (!isResolved) {
-        isResolved = true;
-        clearTimeout(timeoutId);
-        reject(new ProtocolError(ProtocolErrorCode.InternalError, `SSH connection error: ${err.message}`));
-      }
-    });
-    conn.connect(buildConnectConfig(sshConfig));
-  });
 }
 
 // stdio serves exactly one MCP server per process; SSH destinations are managed

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { execSshCommand, sanitizeCommand } from '../src/index';
+import { SSHConnectionManager, execSshCommandWithConnection, sanitizeCommand } from '../src/index';
 
 const host = process.env.SSH_HOST || '127.0.0.1';
 const port = Number(process.env.SSH_PORT || 2222);
@@ -8,8 +8,14 @@ const password = process.env.SSH_PASSWORD || 'secret';
 
 describe('ssh smoke', () => {
   it('executes echo ok', async () => {
-    const result: any = await execSshCommand({ host, port, username, password, insecureHostKey: true }, 'echo ok');
-    expect(result.content[0]).toEqual({ type: 'text', text: 'ok\n' });
+    const m = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
+    try {
+      await m.connect();
+      const result: any = await execSshCommandWithConnection(m, 'echo ok', undefined, 0);
+      expect(result.content[0]).toEqual({ type: 'text', text: 'ok\n' });
+    } finally {
+      m.close();
+    }
   }, 20000);
 });
 

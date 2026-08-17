@@ -1,34 +1,9 @@
-// The last uncovered branches in the otherwise-complete modules: error
-// pass-through in the protocol wrapper, UTF-8 boundary handling in the
-// truncator, and the single-line paths in the tmux parsers.
+// The last uncovered branches in the otherwise-complete modules: UTF-8
+// boundary handling in the truncator, and the single-line paths in the tmux
+// parsers.
 import { describe, it, expect } from 'vitest';
-import { resolveClientForProtocol } from '../src/client-protocol';
-import { ClientResolutionError } from '../src/client-map';
 import { truncateMiddle } from '../src/output';
 import { parseProbeOutput, parseJobStatus, JOB_MARKER } from '../src/tmux';
-
-describe('resolveClientForProtocol error handling', () => {
-  const clients = [{ name: 'Alfa', hosts: ['a.internal'] }];
-
-  it('converts a resolution failure into a protocol error the caller can return', () => {
-    expect(() => resolveClientForProtocol(clients, 'inexistente'))
-      .toThrow(/Client not found/i);
-  });
-
-  it('rethrows anything that is not a resolution failure, unchanged', () => {
-    // A bug inside the resolver must not be disguised as a bad client name.
-    const exploding: any = new Proxy([], {
-      get(target, prop) {
-        if (prop === 'filter') throw new TypeError('falha interna do resolvedor');
-        return (target as any)[prop];
-      },
-    });
-    expect(() => resolveClientForProtocol(exploding, 'qualquer'))
-      .toThrow(/falha interna do resolvedor/);
-    expect(() => resolveClientForProtocol(exploding, 'qualquer'))
-      .not.toThrow(ClientResolutionError);
-  });
-});
 
 describe('truncateMiddle boundaries', () => {
   it('never splits a multi-byte character', () => {

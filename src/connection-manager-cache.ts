@@ -13,20 +13,8 @@ export class DestinationManagerCache<T extends ClosableConnectionManager> {
     return `${host}:${port}:${username}`;
   }
 
-  get(host: string, port: number, username: string): T | undefined {
+  private get(host: string, port: number, username: string): T | undefined {
     return this.managers.get(this.destinationKey(host, port, username));
-  }
-
-  getOrCreate(host: string, port: number, username: string, create: () => T): T {
-    const key = this.destinationKey(host, port, username);
-    const existing = this.managers.get(key);
-    if (existing) {
-      return existing;
-    }
-
-    const manager = create();
-    this.managers.set(key, manager);
-    return manager;
   }
 
   async getOrCreateAsync(

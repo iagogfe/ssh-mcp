@@ -1,9 +1,5 @@
 // Unit coverage for the parts of src/index.ts that need no SSH: the connection
 // manager's own bookkeeping, and buildConnectConfig's host-key verifier.
-//
-// Deliberately does NOT cover execSshCommand or escapeCommandForShell: both are
-// slated for deletion (no production caller), and covering code on its way out
-// is work thrown away.
 import { describe, it, expect, afterEach } from 'vitest';
 import { writeFileSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
