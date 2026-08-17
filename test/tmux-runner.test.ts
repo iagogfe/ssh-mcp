@@ -153,3 +153,31 @@ describe('jobStatus', () => {
     await expect(pending).rejects.toThrow(/unknown jobId/);
   });
 });
+
+describe('paths reachable only with a stubbed connection', () => {
+  it('ensureConnected short-circuits when the session is already usable', async () => {
+    const { manager } = shellManager();
+    // A live socket AND a completed handshake: ensureConnected must not open
+    // a second connection.
+    (manager as any).conn = Object.assign(new EventEmitter(), { _sock: { destroyed: false } });
+    (manager as any).isReady = true;
+    expect(manager.isConnected()).toBe(true);
+
+    await expect(manager.ensureConnected()).resolves.toBeUndefined();
+    expect(manager.isConnected()).toBe(true);
+  });
+
+  it('detaches its listener when a command times out, so the shell stops buffering', async () => {
+    const { manager, shell } = shellManager();
+    const { execSshCommandWithConnection } = await import('../src/index');
+
+    // Nothing ever answers the fence, so the short timeout fires.
+    await expect(
+      execSshCommandWithConnection(manager, 'sleep 999', undefined, 0, 60),
+    ).rejects.toThrow(/timed out/i);
+
+    // A leaked listener would keep accumulating every byte the shell emits for
+    // the rest of the session.
+    expect(shell.listenerCount('data'), 'listener vazou apos o timeout').toBe(0);
+  });
+});
