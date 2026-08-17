@@ -43,7 +43,24 @@ describe('buildRunScript', () => {
     const s = buildRunScript(base);
     // Attempt creation first, not has-session-then-create: the latter is a
     // check-then-act race between two concurrent cold calls (see src/tmux.ts).
-    expect(s).toContain('tmux new-session -d -s ssh-mcp 2>/dev/null || tmux has-session -t ssh-mcp');
+    // The successful-creation branch is the one that must run has-session as
+    // its fallback (not the other way around), so a genuine tmux failure
+    // still aborts under `set -e`.
+    expect(s).toContain('if tmux new-session -d -s ssh-mcp 2>/dev/null; then');
+    expect(s).toContain('else\n  tmux has-session -t ssh-mcp\nfi');
+  });
+
+  it('warns on stderr only when it actually created a fresh session, not on every call', () => {
+    const s = buildRunScript(base);
+    const createLine = 'if tmux new-session -d -s ssh-mcp 2>/dev/null; then';
+    const warnLine = 'echo "ssh-mcp: started a fresh tmux session; any previous shell state is gone" >&2';
+    const idx = s.indexOf(warnLine);
+    expect(idx).toBeGreaterThan(-1);
+    // The warning must be the `then` branch's body, i.e. only reached when
+    // new-session itself succeeded -- not printed unconditionally, and not
+    // printed from the `else` (already-exists) branch.
+    expect(s.indexOf(createLine)).toBeLessThan(idx);
+    expect(idx).toBeLessThan(s.indexOf('else'));
   });
 
   it('recovers the workdir from the tmux environment before creating one', () => {
@@ -56,7 +73,13 @@ describe('buildRunScript', () => {
 
   it('rejects a workdir path containing quotes or spaces', () => {
     const s = buildRunScript(base);
-    expect(s).toContain('exit 78');
+    // Assert the actual guard -- a case pattern matching a single quote,
+    // double quote or space -- not just that the script contains "exit 78"
+    // SOMEWHERE. A bare `toContain('exit 78')` stays green even if the case
+    // pattern is replaced with something that matches nothing (e.g. *foo*):
+    // the exit code is still emitted, on an unreachable branch, and the test
+    // would never notice the guard stopped guarding anything.
+    expect(s).toContain('case "$D" in *[\\\'\\"\\ ]*) echo "ssh-mcp: unsafe workdir path: $D" >&2; exit 78;; esac');
   });
 
   it('guards the workdir before persisting it, so a bad path is never recovered from a later call', () => {
@@ -223,6 +246,15 @@ describe('installHint', () => {
     expect(msg).toContain('h');
     expect(msg).not.toContain('install -y');
     expect(msg).toContain('--noTmux');
+  });
+
+  // src/ is otherwise all-English (as is the whole README); this was the one
+  // user-facing message left in Portuguese.
+  it('is in English, not Portuguese', () => {
+    const msg = installHint('apt-get', 'db01.example.com');
+    expect(msg).toContain('tmux not found on db01.example.com');
+    expect(msg).toMatch(/persistent session/i);
+    expect(msg).not.toMatch(/não encontrado|sessão persistente|instale tmux|gerenciador de pacotes/i);
   });
 });
 

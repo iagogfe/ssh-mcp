@@ -84,8 +84,13 @@ describe('tool surface', () => {
   it('tells the agent that state persists, so it can rely on cd', async () => {
     const res = await rpc('tools/list', {});
     const exec = res.result.tools.find((t: any) => t.name === 'exec');
-    expect(exec.description).toMatch(/persist/i);
     expect(exec.description).toMatch(/working directory|cd/i);
+    // The stateless description ALSO matches /persist/i and /cd/i (it says cd
+    // does NOT persist), so those alone don't discriminate the two branches --
+    // assert wording that only the tmux (persistent) branch actually has:
+    // the detach/job_status offer, which stateless and su mode both lack.
+    expect(exec.description).toMatch(/pass detach: true/i);
+    expect(exec.description).not.toMatch(/do not persist|does not persist/i);
   }, 20000);
 
   it('offers detach on exec', async () => {
@@ -140,6 +145,21 @@ describe('tool surface', () => {
     expect(exec.description).toMatch(/do not persist|does not persist|not persist between/i);
   }, 20000);
 
+  // su mode is NOT stateless: --suPassword opens one long-lived `su -` shell
+  // and every exec command runs in it, so cd/export DO persist -- just
+  // through that shell, not through tmux. Folding su into the same "nothing
+  // persists" branch as --noTmux (TMUX_ATTEMPTED = !NO_TMUX && !SU_ACTIVE
+  // used to do exactly that) told the agent the opposite of the truth.
+  it('describes state persisting through the su shell under --suPassword, not as stateless', async () => {
+    const res = await rpc('tools/list', {}, ['--suPassword=secret']);
+    const exec = res.result.tools.find((t: any) => t.name === 'exec');
+    expect(exec.description).toMatch(/su -/);
+    expect(exec.description).not.toMatch(/do not persist|does not persist/i);
+    // Also not the tmux branch's text: detach requires an actual tmux
+    // session, which su mode does not have.
+    expect(exec.description).not.toMatch(/pass detach: true/i);
+  }, 20000);
+
   // detach must be REJECTED in stateless mode, not silently ignored (there is
   // no tmux session to poll a job's progress in). Requires the live SSH
   // fixture (docker compose) since the rejection sits after ensureConnected().
@@ -161,11 +181,27 @@ describe('tool surface', () => {
   // session entirely. Three distinct descriptions, one per mode -- not a
   // copy of exec's persist/don't-persist ternary.
   describe("sudo-exec's description matches what actually happens in each mode", () => {
-    it('stateless/su mode (--noTmux): plain "nothing persists", no session-reading claim', async () => {
+    it('stateless mode (--noTmux, su not active): plain "nothing persists", no session-reading claim', async () => {
       const res = await rpc('tools/list', {}, ['--noTmux']);
       const sudoExec = res.result.tools.find((t: any) => t.name === 'sudo-exec');
       expect(sudoExec.description).toMatch(/nothing persists/i);
       expect(sudoExec.description).not.toMatch(/session/i);
+    }, 20000);
+
+    // su mode is the serious one: sudo-exec reaches manager.isRootShell() and
+    // runs the command AS IS on the long-lived `su -` shell -- no `sudo`
+    // wrapper, the configured sudo password is not used, and sudoers policy
+    // does not apply. An operator who reads the old (pre-fix) description --
+    // "uses the configured sudo password if present, otherwise passwordless
+    // sudo" -- and has constrained sudoers would wrongly believe sudo-exec is
+    // bounded by that policy and logged through sudo. It is neither.
+    it('su mode (--suPassword): no sudo wrapper at all, configured password unused, sudoers does not apply', async () => {
+      const res = await rpc('tools/list', {}, ['--suPassword=secret']);
+      const sudoExec = res.result.tools.find((t: any) => t.name === 'sudo-exec');
+      expect(sudoExec.description).toMatch(/no sudo wrapper/i);
+      expect(sudoExec.description).toMatch(/sudoers/i);
+      expect(sudoExec.description).not.toMatch(/nothing persists/i);
+      expect(sudoExec.description).not.toMatch(/passwordless sudo/i);
     }, 20000);
 
     it('tmux mode, no sudo password: reads the session directory but does not write it back', async () => {
