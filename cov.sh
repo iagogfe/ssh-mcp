@@ -7,5 +7,5 @@ SSH_MCP_DISABLE_MAIN=1 npx vitest --run --coverage \
   --coverage.include='src/**' \
   test/tmux.test.ts test/output.test.ts test/config.test.ts test/tmux-mode.test.ts \
   test/security.test.ts test/client-map.test.ts test/client-protocol.test.ts \
-  test/connection-manager-cache.test.ts test/channel-cap.test.ts test/su-shell.test.ts test/index-units.test.ts test/tmux-runner.test.ts test/config-units.test.ts test/edge-branches.test.ts test/tool-handlers.test.ts test/elevation.test.ts \
+  test/connection-manager-cache.test.ts test/channel-cap.test.ts test/su-shell.test.ts test/index-units.test.ts test/tmux-runner.test.ts test/config-units.test.ts test/edge-branches.test.ts test/tool-handlers.test.ts test/elevation.test.ts test/lifecycle.test.ts \
   "$@" 2>&1 | tail -25
