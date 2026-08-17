@@ -139,6 +139,21 @@ describe('buildInterruptScript', () => {
   it('validates the session name', () => {
     expect(() => buildInterruptScript('a b')).toThrow();
   });
+
+  it('is unchanged -- a single line, no marker -- when no token is given', () => {
+    expect(buildInterruptScript('ssh-mcp')).toBe('tmux send-keys -t ssh-mcp C-c 2>/dev/null || true\n');
+  });
+
+  it('plants a synthetic completion marker for the timed-out token, guarded against overwriting a real one', () => {
+    const s = buildInterruptScript('ssh-mcp', 'k1z');
+    expect(s).toContain('[ ! -s "$D/rc.k1z" ]');
+    expect(s).toContain('printf \'130\' > "$D/rc.k1z.tmp"');
+    expect(s).toContain('mv "$D/rc.k1z.tmp" "$D/rc.k1z"');
+  });
+
+  it('validates the token when one is given', () => {
+    expect(() => buildInterruptScript('ssh-mcp', "a'b")).toThrow();
+  });
 });
 
 describe('buildProbeScript', () => {
@@ -209,7 +224,7 @@ describe('installHint', () => {
   });
 });
 
-import { buildJobStatusScript, parseJobStatus, JOB_MARKER, JOB_STDERR_MARKER } from '../src/tmux';
+import { buildJobStatusScript, parseJobStatus, JOB_MARKER, JOB_STDERR_MARKER, jobStderrMarker } from '../src/tmux';
 
 describe('buildJobStatusScript', () => {
   const base = { session: 'ssh-mcp', token: 'k7z' };
@@ -244,8 +259,17 @@ describe('buildJobStatusScript', () => {
     expect(s).not.toContain('cat "$D/err.$T" >&2');
     expect(s).not.toContain('tail -c 2000 "$D/err.$T" >&2');
     expect(s).toContain('cat "$D/err.$T"');
-    const markerLine = `printf '\\n${JOB_STDERR_MARKER}\\n'`;
+    const markerLine = `printf '\\n${jobStderrMarker(base.token)}\\n'`;
     expect(s.split(markerLine).length - 1).toBe(2); // once per branch (done, running)
+  });
+
+  it('scopes the stderr marker to the job\'s own token, not a fixed string', () => {
+    // A fixed marker could be echoed by the job's own output; a job cannot
+    // predict its own random token (see nextToken()), so a marker scoped to
+    // it cannot be forged that way.
+    const s = buildJobStatusScript(base);
+    expect(s).toContain(jobStderrMarker(base.token));
+    expect(buildJobStatusScript({ ...base, token: 'k9y' })).not.toContain(jobStderrMarker(base.token));
   });
 
   it('guards the elapsed-time arithmetic instead of evaluating it directly on unguarded cat output', () => {
@@ -277,8 +301,10 @@ describe('buildJobStatusScript', () => {
 });
 
 describe('parseJobStatus', () => {
+  const token = 't1abc';
+
   it('parses a running job and splits its stdout from its stderr at the second marker', () => {
-    const r = parseJobStatus(`${JOB_MARKER} running 47\nbuilding step 3\n\n${JOB_STDERR_MARKER}\nwarn\n`);
+    const r = parseJobStatus(`${JOB_MARKER} running 47\nbuilding step 3\n\n${jobStderrMarker(token)}\nwarn\n`, token);
     expect(r.state).toBe('running');
     expect(r.elapsedSeconds).toBe(47);
     expect(r.exitCode).toBeNull();
@@ -287,7 +313,7 @@ describe('parseJobStatus', () => {
   });
 
   it('parses a finished job with its exit code and no stderr marker present', () => {
-    const r = parseJobStatus(`${JOB_MARKER} done 10\nall output\n`);
+    const r = parseJobStatus(`${JOB_MARKER} done 10\nall output\n`, token);
     expect(r.state).toBe('done');
     expect(r.exitCode).toBe(10);
     expect(r.elapsedSeconds).toBeNull();
@@ -296,30 +322,45 @@ describe('parseJobStatus', () => {
   });
 
   it('splits a done job with both stdout and stderr', () => {
-    const r = parseJobStatus(`${JOB_MARKER} done 3\nout line\n\n${JOB_STDERR_MARKER}\nerr line\n`);
+    const r = parseJobStatus(`${JOB_MARKER} done 3\nout line\n\n${jobStderrMarker(token)}\nerr line\n`, token);
     expect(r.exitCode).toBe(3);
     expect(r.stdout).toBe('out line\n');
     expect(r.stderr).toBe('err line\n');
   });
 
   it('handles a job with only stderr, no stdout', () => {
-    const r = parseJobStatus(`${JOB_MARKER} done 1\n\n${JOB_STDERR_MARKER}\nerr only\n`);
+    const r = parseJobStatus(`${JOB_MARKER} done 1\n\n${jobStderrMarker(token)}\nerr only\n`, token);
     expect(r.stdout).toBe('');
     expect(r.stderr).toBe('err only\n');
   });
 
+  it('does not mistake user output that merely resembles the marker for the real, token-scoped one', () => {
+    // Neither a bare (unscoped) marker line nor one scoped to a DIFFERENT
+    // token can be forged into the real delimiter -- a job cannot predict
+    // its own random token, so it cannot produce a line that matches.
+    const stdout =
+      `${JOB_MARKER} done 0\n` +
+      `first part\n${JOB_STDERR_MARKER}\nstill stdout, not a real marker\n` +
+      `${jobStderrMarker('wrongtoken')}\nstill stdout too\n`;
+    const r = parseJobStatus(stdout, token);
+    expect(r.stdout).toBe(
+      `first part\n${JOB_STDERR_MARKER}\nstill stdout, not a real marker\n${jobStderrMarker('wrongtoken')}\nstill stdout too\n`,
+    );
+    expect(r.stderr).toBe('');
+  });
+
   it('does not mistake user output that looks like the marker', () => {
-    const r = parseJobStatus(`${JOB_MARKER} running 5\n${JOB_MARKER} done 0\n`);
+    const r = parseJobStatus(`${JOB_MARKER} running 5\n${JOB_MARKER} done 0\n`, token);
     expect(r.state).toBe('running');
     expect(r.stdout).toBe(`${JOB_MARKER} done 0\n`);
   });
 
   it('treats a missing marker as a protocol failure', () => {
-    expect(() => parseJobStatus('no marker here\n')).toThrow(/marker/i);
+    expect(() => parseJobStatus('no marker here\n', token)).toThrow(/marker/i);
   });
 
   it('handles a job with no output yet', () => {
-    const r = parseJobStatus(`${JOB_MARKER} running 0\n`);
+    const r = parseJobStatus(`${JOB_MARKER} running 0\n`, token);
     expect(r.state).toBe('running');
     expect(r.stdout).toBe('');
     expect(r.stderr).toBe('');

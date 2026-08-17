@@ -1037,7 +1037,7 @@ export async function jobStatus(
   // which case the marker is absent and parseJobStatus throws.
   let status;
   try {
-    status = parseJobStatus(combined);
+    status = parseJobStatus(combined, jobId);
   } catch {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,
@@ -1049,7 +1049,9 @@ export async function jobStatus(
 
   if (status.state === 'running') {
     const head = `[running] ${status.elapsedSeconds}s — jobId=${jobId}`;
-    return { content: [{ type: 'text', text: [head, status.stdout].filter(Boolean).join('\n') }] };
+    const lines = [head, status.stdout];
+    if (status.stderr) lines.push('stderr:', status.stderr);
+    return { content: [{ type: 'text', text: lines.filter(Boolean).join('\n') }] };
   }
   return formatCommandResult(
     { stdout: status.stdout, stderr: status.stderr, exitCode: status.exitCode },

@@ -50,6 +50,23 @@ describe('tmux session (live SSH + tmux)', () => {
     expect(text(r)).toContain('[exit 10]');
   }, 30000);
 
+  it('documents a known, accepted limitation: exit inside a command-defined function only returns from that function', async () => {
+    // The exit alias (see buildRunScript's comment) only stops the SOURCED
+    // SCRIPT when `exit` is called at that script's own top level. A
+    // die/fail-style helper the command defines itself calls the aliased
+    // exit from inside ITS OWN function call frame, so it returns from that
+    // function -- the guard is silently swallowed, execution continues past
+    // the call site, and the real exit code (0, from the last command that
+    // did run) hides the failure entirely.
+    const r: any = await runInTmux(
+      m,
+      'die() { echo guard >&2; exit 1; }; die; echo REACHED_RM',
+      { kind: 'exec', maxBytes: 0 },
+    );
+    expect(text(r)).toContain('REACHED_RM'); // the guard did not stop execution
+    expect(r.isError).toBeFalsy(); // ...and the wrong exit code hides that too
+  }, 30000);
+
   it('keeps stderr separate from stdout', async () => {
     const r: any = await runInTmux(m, 'echo out; echo err >&2', { kind: 'exec', maxBytes: 0 });
     expect(text(r)).toContain('out');
@@ -96,6 +113,29 @@ describe('tmux session (live SSH + tmux)', () => {
     expect(text(done)).toContain('late');
     expect(text(done)).toContain('[exit 3]');
   }, 60000);
+
+  it('shows a running job\'s own stderr, not just its stdout', async () => {
+    // Watching a running job's progress is the entire point of polling it --
+    // build tools, curl, docker build, apt, all report progress on stderr.
+    const start: any = await runInTmux(m, 'echo out1; echo err1 >&2; sleep 3; echo out2', {
+      kind: 'exec', detach: true, maxBytes: 0,
+    });
+    const id = text(start).match(/jobId=([A-Za-z0-9]+)/)?.[1];
+    expect(id).toBeTruthy();
+
+    await new Promise((r) => setTimeout(r, 800)); // after out1/err1, well before sleep 3 ends
+    const running: any = await jobStatus(m, id!, 0);
+    expect(text(running)).toContain('[running]');
+    expect(text(running)).toContain('out1');
+    expect(text(running)).toContain('stderr:');
+    expect(text(running)).toContain('err1');
+
+    // drain it so it doesn't leak into later tests sharing the session
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (!text(await jobStatus(m, id!, 0)).includes('[running]')) break;
+    }
+  }, 30000);
 
   it('reports a completed job\'s own stderr without a bogus duplicate exit line', async () => {
     // A nonzero job exit code with real stderr is the case that exposes the
@@ -184,6 +224,19 @@ describe('tmux session against a dash-shelled pane (live SSH + tmux)', () => {
       undefined,
       0,
     );
+    // If dash wasn't actually found, tmux would still create the session
+    // (just with a dead pane), and preamble()'s `has-session || new-session`
+    // would silently recreate it with the container's default shell on the
+    // very next call -- the lane would go green having tested bash twice.
+    // Assert the pane is genuinely running dash before trusting anything
+    // that follows.
+    const paneCmd = await execSshCommandWithConnection(
+      setup,
+      `tmux list-panes -t ${dashSession} -F '#{pane_current_command}'`,
+      undefined,
+      0,
+    );
+    expect(text(paneCmd).trim()).toBe('dash');
 
     const dm = new SSHConnectionManager({ ...cfg, tmuxSession: dashSession });
     await dm.connect();
