@@ -42,6 +42,13 @@ jobs:
           PASSWORD_ACCESS: "true"
           USER_PASSWORD: secret
           SUDO_ACCESS: "true"
+          # A suíte de tmux (test/tmux-session.test.ts) precisa de tmux no host
+          # remoto, e um teste específico exercita um pane rodando dash (não
+          # só bash) — dois shells de verdade, não emulados. O mod instala no
+          # primeiro boot — daí o passo "Esperar o tmux" abaixo, separado do
+          # health-check de porta.
+          DOCKER_MODS: linuxserver/mods:universal-package-install
+          INSTALL_PACKAGES: tmux|dash
         ports:
           - 2222:2222
         options: >-
@@ -86,6 +93,25 @@ jobs:
             sleep 1
           done
           echo "::error::sshd não respondeu na porta 2222"
+          exit 1
+
+      - name: Esperar o tmux e o dash
+        # A porta 2222 sobe antes do DOCKER_MODS terminar de instalar os
+        # pacotes (mod roda no primeiro boot) — checar só a porta daria flake,
+        # não falha limpa. `docker exec` fala direto com o container do
+        # serviço. tmux e dash instalam juntos (mesmo INSTALL_PACKAGES), mas
+        # checar os dois é mais barato que assumir isso.
+        run: |
+          cid=$(docker ps --filter ancestor=lscr.io/linuxserver/openssh-server:latest --format '{{.ID}}' | head -n1)
+          if [ -z "$cid" ]; then
+            echo "::error::não encontrei o container do serviço sshd"
+            exit 1
+          fi
+          for i in {1..60}; do
+            docker exec "$cid" tmux -V 2>/dev/null && docker exec "$cid" dash -c 'echo ok' 2>/dev/null && echo "tmux e dash prontos" && exit 0
+            sleep 2
+          done
+          echo "::error::tmux e/ou dash não ficaram prontos no serviço sshd"
           exit 1
 
       - name: Testes

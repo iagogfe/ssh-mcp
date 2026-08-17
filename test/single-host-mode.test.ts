@@ -19,7 +19,9 @@ function callExec(
   extraArgs: string[],
   extraEnv: Record<string, string> = {},
 ): Promise<any> {
-  const args = [testServerPath, '--insecureHostKey', '--port=2222', '--timeout=60000', ...extraArgs];
+  // --tmuxSession isolates this file from every other spawn-based test file
+  // sharing the same live fixture (see description.test.ts).
+  const args = [testServerPath, '--insecureHostKey', '--port=2222', '--timeout=60000', '--tmuxSession=ssh-mcp-singlehost', ...extraArgs];
 
   return new Promise((resolve, reject) => {
     const child = spawn('node', args, {

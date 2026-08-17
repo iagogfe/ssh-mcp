@@ -1,7 +1,7 @@
 {
   "name": "@iagogfe/ssh-mcp",
   "license": "MIT",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "MCP server exposing SSH control for Linux and Windows systems. Fork of tufantunc/ssh-mcp on the MCP SDK v2 (2026-07-28 spec), with host key verification, env-var secrets and output truncation.",
   "type": "module",
   "bin": {

@@ -17,6 +17,7 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
 - [Features](#features)
 - [Installation](#installation)
 - [Client Setup](#client-setup)
+- [Persistent Sessions](#persistent-sessions)
 - [Testing](#testing)
 - [Security](#security)
 - [Disclaimer](#disclaimer)
@@ -36,17 +37,21 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
 - Secure authentication via password or SSH key
 - Built with TypeScript and the official MCP SDK v2 — serves the [2026-07-28 protocol revision](https://modelcontextprotocol.io/specification/2026-07-28) and still accepts 2025-era clients
 - **Host key verification on by default** (`known_hosts` or pinned fingerprint)
+- **Persistent shell session by default** — `cd`/`export` survive across tool calls, backed by a `tmux` session on the remote host. `--noTmux` restores the old stateless per-command behavior. See [Persistent Sessions](#persistent-sessions).
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
 - **Output truncation** (head+tail per stream) to keep large command output from flooding the model's context
 
 ### Tools
 
+By default `exec` and `sudo-exec` run inside a persistent `tmux` session on the remote host, so `cd`/`export` from one call are visible to the next. See [Persistent Sessions](#persistent-sessions) for exactly what does and doesn't persist, and how to opt out with `--noTmux`.
+
 - `exec`: Execute a shell command on the remote server
   - **Parameters:**
     - `client` (optional): Client name from the configured inventory. Omit it when the server is pinned to a single host with `--host`.
     - `command` (required): Shell command to execute on the remote SSH server
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `detach` (optional): Run in the background and return a `jobId` immediately instead of waiting; collect the result later with `job_status`. Only available in the persistent tmux session — not with `--suPassword` or `--noTmux`.
     - `maxBytes` (optional): Truncate output to this many bytes. Defaults to the global `--maxOutputBytes` setting. Pass `0` to get full output.
   - **Result format:** On success (exit 0, no stderr) the tool returns the command's stdout only. Otherwise a footer is appended after a `---` separator: `[exit N]` (or `[no exit code]` / `[killed by SIG…]`), followed by stderr when present. The result is marked as an error (`isError`) only when the exit code is non-zero or the process was killed by a signal — stderr alone with exit 0 is shown but is not an error. Large output is truncated in the middle (per stream); pass `maxBytes: 0` (or `--maxOutputBytes=none`) for full output.
   - **Timeout Configuration:**
@@ -71,6 +76,14 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
     - Max command characters are configured via `--maxChars`
     - Default: `1000`
     - No-limit mode: set `--maxChars=none` or any `<= 0` value (e.g. `--maxChars=0`)
+
+- `job_status`: Check on a background job started with `exec(detach: true)`
+  - Only registered when the server is attempting tmux mode (i.e. not `--noTmux` and not `--suPassword`).
+  - **Parameters:**
+    - `jobId` (required): The `jobId` returned by `exec` with `detach: true`
+    - `client` (optional): Client whose session holds the job. Omit it when the server is pinned to a single host.
+    - `maxBytes` (optional): Truncate output to this many bytes before head+tail truncation; `0` disables.
+  - **Result format:** While the job is still running, returns its elapsed time and a tail of its output so far. Once it has finished, returns the full output and exit code (in the same `[exit N]`/stderr footer format as `exec`) and frees the job's files on the remote host.
 
 ## Installation
 
@@ -262,6 +275,81 @@ After adding the server, restart Claude Code and ask Cascade to execute a comman
 
 For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
 
+## Persistent Sessions
+
+By default, shell state persists between `exec`/`sudo-exec` calls: `cd` changes the working directory and `export`'d variables stay set for later commands against the same destination, so you don't need to chain everything with `&&` or `cd` back into place on every call. Each tool call still opens its own short-lived SSH channel, exactly as before — what changed is that the *shell* those channels talk to now lives in a `tmux` session on the remote host (named `ssh-mcp` by default) instead of being a fresh, throwaway shell every time. The state lives on the remote host, not in the SSH connection.
+
+### tmux is required by default
+
+The server preflights the target host on first use. If `tmux` is missing there, the call fails immediately with an error naming an install command for the detected package manager (`apt-get`, `dnf`, `yum`, `zypper`, `apk`, or `pacman`) rather than silently falling back to per-command execution — so an agent driving the tool can never believe state persisted when it did not.
+
+- `--noTmux` / `SSH_MCP_NO_TMUX=1`: opt out explicitly and restore the pre-2.0 stateless behavior — every call runs in its own shell again; `cd`/`export` do not persist.
+
+### Isolating sessions on a shared host
+
+- `--tmuxSession=<name>` / `SSH_MCP_TMUX_SESSION`: name of the tmux session to attach to or create (default `ssh-mcp`). Set this when two ssh-mcp server instances connect as the same user to the same host, so they get separate shells instead of fighting over one. The name must match `^[A-Za-z0-9_-]+$` (letters, digits, `-`, `_`); an invalid name is rejected at startup, not on the first tool call.
+
+### Mode precedence
+
+The server resolves one mode per connection, in this order:
+
+1. **`--suPassword` / `SSH_MCP_SU_PASSWORD` configured** → `su` mode. This wins outright; the host is not even probed for tmux.
+2. **`--noTmux` / `SSH_MCP_NO_TMUX=1`** → stateless mode.
+3. Otherwise the host is probed for `tmux`: present → tmux mode; missing → the call fails with the install hint above.
+
+**`su` mode is not the same as stateless.** `--suPassword` opens one long-lived `su -` shell on the connection and runs every `exec`/`sudo-exec` command through it. `cd` and `export` **do** persist there, across calls — just through that shell, not through tmux. Don't lump `su` in with `--noTmux`; only `--noTmux` (or a host with no tmux) is truly stateless.
+
+### `sudo-exec` and session state
+
+`sudo-exec`'s relationship to the session is not symmetric with `exec`'s:
+
+- **tmux mode, passwordless sudo** (no sudo password configured): runs `sudo -n sh` *inside* the tmux session, as a subprocess of the pane's shell. It reads whatever directory a prior `cd` left the session in, but it cannot write back — its own `cd`/`export` die with the subprocess.
+- **tmux mode, with a configured sudo password** (`SSH_MCP_SUDO_PASSWORD` / `--sudoPassword`): moves off the session entirely, onto its own separate channel. `sudo -S` needs a private stdin to read the password from, and the shared tmux pane has no per-call stdin to offer. That channel starts from the SSH login directory, not wherever the session's `cd` left off, and nothing it does persists for later calls either.
+- **`--noTmux` (stateless mode)**: no session exists at all; every call, `sudo-exec` included, runs in its own throwaway shell.
+- **`--suPassword` (su mode)**: has no *tmux* session either, but is not stateless — `sudo-exec` runs the command directly on the same long-lived `su -` shell that `exec` uses, with **no `sudo` wrapper at all** (the shell is already root). `cd`/`export` from that call persist in the su shell for later calls, `exec` or `sudo-exec` alike.
+
+### Background jobs
+
+`exec` accepts `detach: true` (tmux mode only) to start a command in the background and return a `jobId` immediately instead of blocking. Collect it later with `job_status`, which returns the elapsed time and a tail of output while the job is still running, or the full output and exit code once it's done (freeing its files on the remote host at that point). The working directory is stored inside the tmux session's own environment, not in the MCP server process, so a queued or running job survives an MCP server restart. `job_status` is only registered, and `detach` only accepted, when the server is actually attempting tmux mode — neither exists with `--noTmux` or `--suPassword`.
+
+### Commands serialize
+
+A non-detached `exec` call, or a passwordless `sudo-exec` call, sends its command to the tmux pane and waits for it to finish. Because the pane's shell reads and executes one line at a time, two such calls issued in parallel against the same destination queue up on the shared pane and run one after another, not concurrently — a slow command blocks every other synchronous call against that destination until it finishes or times out. `exec(detach: true)` is the escape hatch: a backgrounded command frees the pane immediately, so it doesn't block other calls; poll its result later with `job_status`, which reads the job's result files directly and does not itself wait on the pane.
+
+### Known limitation: `exit` inside your own function
+
+Commands are sourced into the pane shell (`. '$D/cmd.$T'`, not run as a subprocess) so that `cd`/`export` mutate the persistent shell instead of a throwaway one. To stop a bare top-level `exit` in your command from also killing the whole tmux pane (and wedging the session for every later call), `exit` is aliased to `return` for the duration of the command.
+
+This has one accepted, unfixed residual: if the command **defines its own function** that calls `exit` — a `die`/`fail` helper is the common shape —
+
+```sh
+die() { echo "failed" >&2; exit 1; }
+die
+rm -rf /tmp/x
+```
+
+the aliased `return` only returns from *that function's own call frame*, not from the whole sourced script, so execution continues past the call site — and `rm -rf /tmp/x` still runs, on both `dash` and `bash`. Worse, the tool call reports success: the swallowed `exit 1` never reaches the sourced script's own exit code, so the last command that actually ran (`rm -rf /tmp/x`) determines it, and the response comes back with exit 0 and `isError` falsy — nothing distinguishes it from a command whose guard never fired. This is documented, not fixed, in `src/tmux.ts`: fixing it would mean either giving up the sourcing that makes `cd`/`export` persist, or letting `exit` kill the pane shell again, which is worse. The verified workaround is to write the helper with `return` and check it explicitly at the call site:
+
+```sh
+die() { echo "failed" >&2; return 1; }
+die || exit 1
+rm -rf /tmp/x
+```
+
+A bare `exit` at the sourced command's own top level (not inside a function you defined) still stops it correctly.
+
+### Recovery
+
+- `tmux attach -r -t ssh-mcp` on the remote host (substitute your `--tmuxSession` name) shows the live session, including any command currently running. Use the read-only `-r` flag: `send-keys` targets the session's current window's active pane, so a writable attach lets a human who switches windows or opens a pager redirect the next `exec`'s payload into it instead of the pane the tool expects.
+- A poisoned session — e.g. a command that ran `export PATH=/nada` — is cleared with `tmux kill-session -t ssh-mcp`; the next `exec`/`sudo-exec` call recreates it from scratch.
+
+### Breaking changes in 2.0.0
+
+- **tmux is now required by default.** A host without it fails loudly, with an install command, instead of silently running the old stateless per-command behavior. Pass `--noTmux` to opt back into 1.x behavior.
+- `exec` gains a `detach` parameter.
+- `job_status` is a new tool (tmux mode only).
+- The `exec` and `sudo-exec` tool descriptions changed to describe the new session behavior.
+
 ## Testing
 
 You can use the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) for visual debugging of this MCP Server.
@@ -270,11 +358,13 @@ You can use the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspe
 npm run inspect
 ```
 
-The test suite needs a throwaway SSH server, which `docker-compose.yml` provides:
+The test suite needs a throwaway SSH server, which `docker-compose.yml` provides. It also needs `tmux` and `dash` on that server (the tmux-session tests exercise both) — the compose service installs them via `DOCKER_MODS` on first boot, which finishes after the SSH port starts answering, so wait for `tmux -V` to succeed inside the container before running the suite:
 
 ```sh
 docker compose up -d
+until docker compose exec ssh tmux -V >/dev/null 2>&1; do sleep 2; done
 SSH_HOST=127.0.0.1 SSH_PORT=2222 SSH_USER=test SSH_PASSWORD=secret npm test
+docker compose down
 ```
 
 ## Security
@@ -310,3 +400,4 @@ This fork adds:
 - Host key verification enabled by default, with `--hostFingerprint` / `--knownHosts` / `--insecureHostKey`
 - Optional inventory-based routing through `--clientMap`, with `SSH_MCP_USER`/`SSH_MCP_PASSWORD` credentials from the process environment
 - Exit-code-aware tool results and head+tail output truncation (`--maxOutputBytes` / `maxBytes`)
+- tmux-backed [persistent shell sessions](#persistent-sessions) with background jobs (`exec(detach: true)` / `job_status`), on by default with `--noTmux` to opt out
