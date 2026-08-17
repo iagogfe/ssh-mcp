@@ -759,7 +759,7 @@ const TMUX_ATTEMPTED = !NO_TMUX && !SU_ACTIVE;
 const server = new McpServer(
   {
     name: 'SSH MCP Server',
-    version: '1.5.0',
+    version: '2.0.0',
   },
   {
     capabilities: {
