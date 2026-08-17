@@ -35,8 +35,6 @@ export function truncateMiddle(text: string, maxBytes: number): string {
   const tailRegion = buf.length - tailStart;
   if (firstNl !== -1 && firstNl < buf.length - 1 && (firstNl - tailStart) * 2 < tailRegion) tailStart = firstNl + 1;
 
-  if (tailStart <= headEnd) return text; // budgets overlap; nothing to omit
-
   const omitted = buf.subarray(headEnd, tailStart);
   let omittedLines = 0;
   for (const b of omitted) if (b === 0x0a) omittedLines++;
@@ -100,7 +98,7 @@ export function formatCommandResult(
 
 // Parse a maxOutputBytes config value. def when unset/NaN; 0 (disabled) for
 // "none" or non-positive; otherwise the positive integer.
-export function parseMaxBytes(raw: string | null | undefined, def: number): number {
+export function parseLimit(raw: string | null | undefined, def: number): number {
   if (typeof raw !== 'string') return def;
   if (raw.toLowerCase() === 'none') return 0;
   const parsed = parseInt(raw, 10);

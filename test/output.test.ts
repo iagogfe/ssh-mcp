@@ -114,22 +114,22 @@ describe('formatCommandResult', () => {
   });
 });
 
-import { parseMaxBytes } from '../src/output';
+import { parseLimit } from '../src/output';
 
-describe('parseMaxBytes', () => {
+describe('parseLimit', () => {
   it('uses the default when unset or not a number', () => {
-    expect(parseMaxBytes(undefined, 8192)).toBe(8192);
-    expect(parseMaxBytes(null, 8192)).toBe(8192);
-    expect(parseMaxBytes('abc', 8192)).toBe(8192);
+    expect(parseLimit(undefined, 8192)).toBe(8192);
+    expect(parseLimit(null, 8192)).toBe(8192);
+    expect(parseLimit('abc', 8192)).toBe(8192);
   });
   it('treats none / 0 / negative as disabled (0)', () => {
-    expect(parseMaxBytes('none', 8192)).toBe(0);
-    expect(parseMaxBytes('NONE', 8192)).toBe(0);
-    expect(parseMaxBytes('0', 8192)).toBe(0);
-    expect(parseMaxBytes('-5', 8192)).toBe(0);
+    expect(parseLimit('none', 8192)).toBe(0);
+    expect(parseLimit('NONE', 8192)).toBe(0);
+    expect(parseLimit('0', 8192)).toBe(0);
+    expect(parseLimit('-5', 8192)).toBe(0);
   });
   it('parses a positive integer', () => {
-    expect(parseMaxBytes('16384', 8192)).toBe(16384);
+    expect(parseLimit('16384', 8192)).toBe(16384);
   });
 });
 
