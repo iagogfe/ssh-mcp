@@ -67,7 +67,12 @@ export function formatCommandResult(
     return { content: [{ type: 'text', text: outText }] };
   }
 
-  const abnormalExit = exitCode === null && !killedBySignal;
+  // ssh2 reports `undefined`, not null, when the channel closes abnormally — a
+  // connection dropped mid-command is the common way in. Checking only null let
+  // that value fall through to the generic branch below, printing a literal
+  // "[exit undefined]" and, worse, leaving isError unset: a command that never
+  // completed was handed to the caller as a success.
+  const abnormalExit = (exitCode === null || exitCode === undefined) && !killedBySignal;
 
   const lines: string[] = [];
   if (outText.length > 0) lines.push(outText);

@@ -132,3 +132,38 @@ describe('parseMaxBytes', () => {
     expect(parseMaxBytes('16384', 8192)).toBe(16384);
   });
 });
+
+describe('abnormal channel close', () => {
+  // ssh2 hands back `undefined` (not null) for the exit code when the channel
+  // closes abnormally -- a dropped connection mid-command is the common way in.
+  // killedBySignal already accounted for undefined; abnormalExit did not, so the
+  // value fell through to the generic branch and printed "[exit undefined]"
+  // WITHOUT setting isError: an agent saw a command that never completed as a
+  // success. Reproduced live by killing the SSH connection under a running
+  // command.
+  it('reports an undefined exit code as abnormal, not as a literal', () => {
+    const r: any = formatCommandResult(
+      { stdout: 'parcial\n', stderr: '', exitCode: undefined as any },
+      8192,
+    );
+    const text = r.content[0].text;
+    expect(text).not.toContain('undefined');
+    expect(text).toContain('[no exit code]');
+    expect(r.isError).toBe(true);
+  });
+
+  it('still reports a signal kill as a signal when the code is undefined', () => {
+    const r: any = formatCommandResult(
+      { stdout: '', stderr: '', exitCode: undefined as any, signal: 'KILL' },
+      8192,
+    );
+    expect(r.content[0].text).toContain('[killed by SIGKILL]');
+    expect(r.isError).toBe(true);
+  });
+
+  it('keeps treating a null exit code as abnormal', () => {
+    const r: any = formatCommandResult({ stdout: '', stderr: '', exitCode: null }, 8192);
+    expect(r.content[0].text).toContain('[no exit code]');
+    expect(r.isError).toBe(true);
+  });
+});
