@@ -185,17 +185,44 @@ describe('buildRunScript', () => {
 
   it('detach backgrounds the subshell and records a start time', () => {
     const s = buildRunScript({ ...base, detach: true });
-    expect(s).toContain("date +%s > '$D/start.$T.tmp'");
+    expect(s).toContain('date +%s > "$D/start.$T.tmp"');
     expect(s).toContain('; } &');
   });
 
   it('writes the start timestamp atomically via a temp file and rename, never a direct redirect', () => {
     const s = buildRunScript({ ...base, detach: true });
-    expect(s).toContain("date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'");
+    expect(s).toContain('date +%s > "$D/start.$T.tmp" && mv "$D/start.$T.tmp" "$D/start.$T"');
     // A bare `>` redirect straight onto start.$T is exactly the non-atomic
     // write this guards against: it would let a poll observe the file after
     // creation but before `date` has written into it.
-    expect(s).not.toMatch(/date \+%s > '\$D\/start\.\$T';/);
+    expect(s).not.toMatch(/date \+%s > "\$D\/start\.\$T"[^.]/);
+  });
+
+  it('writes the start marker itself instead of leaving it to the pane', () => {
+    // The jobId is returned as soon as this script exits, but send-keys only
+    // QUEUES the payload -- the pane runs it whenever it is next free. A start
+    // marker written by the payload therefore appears after the caller already
+    // holds the jobId, and a job_status issued in between reports "unknown
+    // jobId" for a job that is perfectly alive.
+    const s = buildRunScript({ ...base, detach: true });
+    const sendKeys = s.indexOf('tmux send-keys');
+    const marker = s.indexOf('mv "$D/start.$T.tmp" "$D/start.$T"');
+
+    // Its own line in the channel script, never inside the payload.
+    expect(marker).toBeGreaterThan(-1);
+    expect(s.slice(sendKeys).indexOf('\n')).toBeLessThan(marker - sendKeys);
+    expect(s).not.toMatch(/send-keys[^\n]*date \+%s/);
+
+    // And after the send, so a launch that never reached the pane leaves no
+    // marker claiming a job that does not exist.
+    expect(marker, 'marcador criado antes do send-keys').toBeGreaterThan(sendKeys);
+  });
+
+  it('leaves no start marker for a blocking run, so its token is not a jobId', () => {
+    // A blocking run's files outlive it in the workdir. Only the start marker
+    // distinguishes a real background job from those leftovers, so job_status
+    // on a non-job token has to stay "unknown jobId".
+    expect(buildRunScript(base)).not.toContain('start.$T.tmp');
   });
 
   it('detach omits the collect block so it returns immediately', () => {

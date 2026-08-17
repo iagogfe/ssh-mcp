@@ -168,10 +168,6 @@ export function buildRunScript(opts: RunScriptOptions): string {
       ? `sudo -n sh '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
       : `shopt -s expand_aliases 2>/dev/null; alias exit=return; . '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unalias exit 2>/dev/null`;
 
-  // The timestamp write must be atomic: a poll landing between create and
-  // write of a direct `>` redirect would see an existing-but-empty start
-  // file. Writing to a temp name and renaming into place means start.$T is
-  // never observable half-written (rename() is atomic within a directory).
   const payload = detach
     // The job is backgrounded inside a subshell that the pane shell then runs in
     // the FOREGROUND: the subshell exits immediately, so the pane's job table
@@ -181,7 +177,7 @@ export function buildRunScript(opts: RunScriptOptions): string {
     // announcement lands in THAT command's stderr, leaking this script's own
     // payload text to the caller. Reproduced 4/4 by detaching a 2 s job and
     // running a 5 s command alongside it.
-    ? `date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'; ( { ${body}; } & )`
+    ? `( { ${body}; } & )`
     : body;
 
   const lines = [
@@ -197,6 +193,32 @@ export function buildRunScript(opts: RunScriptOptions): string {
     'cat > "$D/cmd.$T"',
     `tmux send-keys -t ${session} "${payload}" Enter`,
   ];
+
+  if (detach) {
+    // The start marker is what makes a token a collectable jobId: job_status
+    // answers "unknown jobId" without it. It is written HERE, by the channel
+    // shell, rather than by the payload, because send-keys only QUEUES the
+    // payload -- the pane runs it whenever it is next free. Written by the
+    // payload, the marker lands only after this script has already exited and
+    // handed the caller its jobId, so a job_status issued in between reports a
+    // perfectly live job as unknown. Observed as an intermittent CI failure
+    // (Node 22 only, same commit green on 20 and 24): "unknown jobId
+    // ke5cdeb9a1z" on the first poll after a detached launch.
+    //
+    // After send-keys, not before: `set -eu` aborts the script if the send
+    // fails, so a launch that never reached the pane leaves no marker behind
+    // claiming a job that does not exist.
+    //
+    // Elapsed time therefore counts from the moment the caller asked, not from
+    // whenever a busy pane got around to it -- which is the more useful of the
+    // two when the pane is busy, and the same number when it is not.
+    //
+    // The write must be atomic: a poll landing between create and write of a
+    // direct `>` redirect would see an existing-but-empty start file. Writing
+    // to a temp name and renaming into place means start.$T is never
+    // observable half-written (rename() is atomic within a directory).
+    lines.push('date +%s > "$D/start.$T.tmp" && mv "$D/start.$T.tmp" "$D/start.$T"');
+  }
 
   if (!detach) {
     lines.push(
