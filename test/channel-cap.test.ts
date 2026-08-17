@@ -97,3 +97,29 @@ describe('channel-open retry', () => {
     expect(isRetryableChannelError(undefined)).toBe(false);
   });
 });
+
+describe('shared su shell', () => {
+  // The su path writes into an already-open stream. Making it wait on a channel
+  // slot both wasted budget it never spends and pushed its first write past a
+  // microtask, breaking callers that read the stream synchronously.
+  it('does not consume a channel slot', async () => {
+    const { EventEmitter } = await import('events');
+    class FakeShell extends EventEmitter {
+      written: string[] = [];
+      write(c: string) { this.written.push(c); }
+      end() {}
+    }
+    const m = new SSHConnectionManager({ ...cfg, maxConcurrent: 1 });
+    const shell = new FakeShell();
+    (m as any).conn = new EventEmitter();
+    (m as any).suShell = shell;
+    (m as any).isElevated = true;
+
+    const { execSshCommandWithConnection } = await import('../src/index');
+    void execSshCommandWithConnection(m, 'id -u', undefined, 8192);
+
+    // Synchronous up to the first write, and no slot taken.
+    expect(shell.written.some((w) => w.startsWith('id -u'))).toBe(true);
+    expect(m.activeChannels()).toBe(0);
+  });
+});

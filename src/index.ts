@@ -1089,6 +1089,14 @@ export async function execSshCommandWithConnection(
   // parallel tool calls opens a channel each and sshd refuses everything past
   // MaxSessions with a bare "Channel open failure: open failed" -- an error the
   // agent can do nothing with, for work that would have queued anyway.
+  // The persistent `su -` shell opens no channel -- it writes into a stream that
+  // already exists -- so it must not consume a slot, and there is nothing here
+  // for a retry to fix. Taking the fast path also keeps this function
+  // synchronous up to its first write, which callers (and tests) rely on.
+  if ((manager as any).suShell) {
+    return runOnChannel(manager, command, stdin, maxBytes, timeoutMs);
+  }
+
   // The cap keeps us under MaxSessions in steady state, but sshd does not free a
   // slot the instant our side closes a channel, so a burst can still be refused
   // mid-churn. Measured on a live host: with the cap alone, 20 concurrent calls
