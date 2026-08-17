@@ -4,7 +4,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { McpServer, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
-import { createHash, createHmac } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -359,6 +359,15 @@ export class SSHConnectionManager {
   private suPromise: Promise<void> | null = null;
   private isElevated = false;  // Track if we're in su mode
   private tokenSeq = 0;        // Monotonic counter for unique command sentinels
+  // Per-instance random component of nextToken(). The tmux workdir is
+  // deliberately persisted in the session's own environment so a jobId
+  // survives an MCP server restart -- which means a bare per-instance counter
+  // (previously 'k1z', 'k2z', ...) reissues the exact same tokens every
+  // restart, and can also collide against a second, concurrently-live
+  // instance sharing the same session (e.g. two managers pointed at the same
+  // tmuxSession). Either can hand a later command a stale rc/out/err file
+  // left by an old, never-collected run under that token.
+  private readonly tokenNonce = randomBytes(4).toString('hex');
   private tmuxMode: TmuxMode | null = null;
   private probe: TmuxProbe | null = null;
 
@@ -369,7 +378,7 @@ export class SSHConnectionManager {
   // Unique-per-command token used to fence command output in the persistent shell.
   nextToken(): string {
     this.tokenSeq += 1;
-    return 'k' + this.tokenSeq.toString(36) + 'z';
+    return 'k' + this.tokenNonce + this.tokenSeq.toString(36) + 'z';
   }
 
   getTmuxSession(): string {
@@ -986,7 +995,10 @@ export async function runInTmux(
 
   try {
     const res = await execSshCommandWithConnection(manager, script, command, opts.maxBytes, opts.timeoutMs);
-    if (opts.detach) {
+    // A failed launch (unsafe workdir, tmux missing, cat > cmd.$T failing) is
+    // not a job: report it now, rather than a phantom jobId whose only trace
+    // is job_status later saying "unknown jobId".
+    if (opts.detach && !res.isError) {
       return {
         content: [{ type: 'text', text: `[detached] jobId=${token} — collect with job_status("${token}")` }],
       };
@@ -995,7 +1007,14 @@ export async function runInTmux(
   } catch (err: any) {
     // A wedged command would otherwise keep the session busy for every later
     // call. Ctrl-C frees it; failure to send is not worth masking the timeout.
-    if (/timed out/i.test(err?.message || '')) {
+    //
+    // Skipped entirely for a detached launch: its script never polls, so
+    // there's no orphaned poller to rescue with the synthetic marker -- it
+    // would only risk reporting a job that's actually still running as done.
+    // And Ctrl-C would hit whatever the pane happens to be running right now,
+    // which for a backgrounded launch is somebody else's command, not this
+    // one.
+    if (!opts.detach && /timed out/i.test(err?.message || '')) {
       try {
         await execSshCommandWithConnection(manager, buildInterruptScript(session, token), undefined, 0, 5000);
       } catch { /* best effort */ }
@@ -1018,7 +1037,7 @@ export async function jobStatus(
   // which case the marker is absent and parseJobStatus throws.
   let status;
   try {
-    status = parseJobStatus(combined, '');
+    status = parseJobStatus(combined);
   } catch {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,

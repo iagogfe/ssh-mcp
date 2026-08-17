@@ -57,3 +57,27 @@ describe('SSHConnectionManager.resolveMode', () => {
     expect(new SSHConnectionManager({ ...base, tmuxSession: 'deploy' }).getTmuxSession()).toBe('deploy');
   });
 });
+
+describe('SSHConnectionManager.nextToken', () => {
+  it('produces tokens matching the tmux token format', () => {
+    const m = new SSHConnectionManager(base);
+    expect(m.nextToken()).toMatch(/^[A-Za-z0-9]+$/);
+  });
+
+  it('increments across calls on the same instance', () => {
+    const m = new SSHConnectionManager(base);
+    expect(m.nextToken()).not.toBe(m.nextToken());
+  });
+
+  it('never repeats across different instances, so a restart or a second manager on the same session cannot collide with a stale file an earlier run left behind', () => {
+    // The tmux workdir is deliberately persisted in the session's own
+    // environment so a jobId survives an MCP server restart -- which means a
+    // bare per-instance counter (the old 'k1z', 'k2z', ...) reissues the
+    // exact same first token every time a fresh manager is constructed,
+    // colliding with a stale rc/out/err file an earlier, never-collected run
+    // left under that same token.
+    const a = new SSHConnectionManager(base).nextToken();
+    const b = new SSHConnectionManager(base).nextToken();
+    expect(a).not.toBe(b);
+  });
+});

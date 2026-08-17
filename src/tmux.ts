@@ -80,16 +80,35 @@ export function buildRunScript(opts: RunScriptOptions): string {
   // throwaway one. But `.` runs in the CURRENT shell: if the command calls the
   // real `exit` builtin, POSIX has that terminate the pane shell itself — and
   // since it's the session's only pane, tmux tears the whole session down with
-  // it, wedging every later call. Shadowing `exit` as a function that `return`s
-  // instead turns it back into "stop the sourced script", matching what an
-  // ad-hoc command's caller actually expects. It is unset again once the exit
-  // code is captured, so it never leaks into a human attaching to the same
-  // session. sudo's body runs the command as a real subprocess (`sh`), where
-  // `exit` already only ends that subprocess, so it needs no such shadow.
+  // it, wedging every later call.
+  //
+  // A shell *function* named `exit` cannot fix this: `exit` is a POSIX special
+  // built-in, so dash refuses to even parse `exit() { ... }` ("Bad function
+  // name"); and on bash, `return` inside that function returns from the
+  // function's own call frame, not from the sourced script, so execution of
+  // the sourced script resumes right after the `exit` call instead of
+  // stopping — silently discarding an early-exit guard.
+  //
+  // An *alias* is different: alias expansion is a textual, parse-time
+  // substitution, so `alias exit=return` turns a later `exit N` into a
+  // literal `return N`, parsed exactly as if the sourced script had written
+  // `return` itself. `return` executed while sourcing stops the sourcing (not
+  // the pane shell) and reports N as its exit status — matching what an
+  // ad-hoc command's caller actually expects, including inside a subshell or
+  // pipeline element (there it just ends that forked subshell, same as real
+  // `exit`, because the "currently sourcing" state a POSIX shell tracks is
+  // copied into the fork). `shopt -s expand_aliases` makes this correct even
+  // if the pane shell is ever invoked non-interactively (bash only expands
+  // aliases by default when interactive; dash does not gate on it, and
+  // silently ignores the unknown `shopt` builtin). The alias is removed again
+  // once the exit code is captured, so it never leaks into a human attaching
+  // to the same session. sudo's body runs the command as a real subprocess
+  // (`sh`), where `exit` already only ends that subprocess, so it needs
+  // neither shadow.
   const body =
     kind === 'sudo'
       ? `sudo -n sh '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
-      : `exit() { return \\$1; }; . '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unset -f exit`;
+      : `shopt -s expand_aliases 2>/dev/null; alias exit=return; . '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unalias exit 2>/dev/null`;
 
   // The timestamp write must be atomic: a poll landing between create and
   // write of a direct `>` redirect would see an existing-but-empty start
@@ -102,6 +121,13 @@ export function buildRunScript(opts: RunScriptOptions): string {
   const lines = [
     preamble(session),
     `T='${token}'`,
+    // Tokens are per-manager-instance random, not globally unique, and the
+    // workdir deliberately survives restarts (that's what lets a jobId still
+    // resolve after one) -- so a stale file from an old, never-collected run
+    // that happened to land on the same token must not be mistaken for this
+    // run's own output. Clearing it first means the first write anyone sees
+    // is always this run's.
+    'rm -f "$D/cmd.$T" "$D/out.$T" "$D/err.$T" "$D/rc.$T" "$D/start.$T"',
     'cat > "$D/cmd.$T"',
     `tmux send-keys -t ${session} "${payload}" Enter`,
   ];
@@ -212,6 +238,13 @@ export function installHint(pm: string | null, host: string): string {
 
 export const JOB_MARKER = 'SSH_MCP_JOB';
 
+// Delimits the job's own stderr within the status script's single real stdout
+// stream (see buildJobStatusScript for why: the job's stderr cannot travel on
+// the script's own real stderr, or formatCommandResult reformats an
+// otherwise-successful exit-0 status script as if it had failed, mislabeling
+// the job's stdout as the script's stderr and appending a bogus [exit 0]).
+export const JOB_STDERR_MARKER = 'SSH_MCP_JOB_STDERR';
+
 export interface JobStatus {
   state: 'running' | 'done';
   elapsedSeconds: number | null;
@@ -239,7 +272,8 @@ export function buildJobStatusScript(opts: { session: string; token: string }): 
     'if [ -s "$D/rc.$T" ]; then',
     `  printf '${JOB_MARKER} done %s\\n' "$(cat "$D/rc.$T")"`,
     '  cat "$D/out.$T"',
-    '  cat "$D/err.$T" >&2',
+    `  printf '\\n${JOB_STDERR_MARKER}\\n'`,
+    '  cat "$D/err.$T"',
     '  rm -f "$D/cmd.$T" "$D/out.$T" "$D/err.$T" "$D/rc.$T" "$D/start.$T"',
     'else',
     // Defense in depth alongside the atomic write in buildRunScript: even if
@@ -251,13 +285,21 @@ export function buildJobStatusScript(opts: { session: string; token: string }): 
     `  case "$S" in ''|*[!0-9]*) E=0 ;; *) E=$(( $(date +%s) - S )) ;; esac`,
     `  printf '${JOB_MARKER} running %s\\n' "$E"`,
     '  tail -c 2000 "$D/out.$T" 2>/dev/null || true',
-    '  tail -c 2000 "$D/err.$T" >&2 2>/dev/null || true',
+    `  printf '\\n${JOB_STDERR_MARKER}\\n'`,
+    '  tail -c 2000 "$D/err.$T" 2>/dev/null || true',
     'fi',
     'exit 0',
   ].join('\n');
 }
 
-export function parseJobStatus(stdout: string, stderr: string): JobStatus {
+// Splits the job's own stdout from its own stderr, both carried on the single
+// `stdout` string (see JOB_STDERR_MARKER). The marker printf always leads with
+// its own newline, so it lands on a clean line even when the job's own stdout
+// doesn't end in one -- at the cost of one possible extra blank line folded
+// into `stdout` when it already did. A missing marker (e.g. a caller that
+// only ever had stdout to begin with) degrades to "no stderr" rather than
+// throwing.
+export function parseJobStatus(stdout: string): JobStatus {
   const nl = stdout.indexOf('\n');
   const first = nl === -1 ? stdout : stdout.slice(0, nl);
   const rest = nl === -1 ? '' : stdout.slice(nl + 1);
@@ -267,8 +309,13 @@ export function parseJobStatus(stdout: string, stderr: string): JobStatus {
     throw new Error(`job status marker missing; got ${JSON.stringify(first.slice(0, 80))}`);
   }
 
+  const sep = `\n${JOB_STDERR_MARKER}\n`;
+  const sepIdx = rest.indexOf(sep);
+  const jobStdout = sepIdx === -1 ? rest : rest.slice(0, sepIdx);
+  const jobStderr = sepIdx === -1 ? '' : rest.slice(sepIdx + sep.length);
+
   const value = parseInt(m[2], 10);
   return m[1] === 'running'
-    ? { state: 'running', elapsedSeconds: value, exitCode: null, stdout: rest, stderr }
-    : { state: 'done', elapsedSeconds: null, exitCode: value, stdout: rest, stderr };
+    ? { state: 'running', elapsedSeconds: value, exitCode: null, stdout: jobStdout, stderr: jobStderr }
+    : { state: 'done', elapsedSeconds: null, exitCode: value, stdout: jobStdout, stderr: jobStderr };
 }
