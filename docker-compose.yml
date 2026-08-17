@@ -6,6 +6,8 @@ services:
       - PASSWORD_ACCESS=true
       - USER_PASSWORD=secret
       - SUDO_ACCESS=true
+      - DOCKER_MODS=linuxserver/mods:universal-package-install
+      - INSTALL_PACKAGES=tmux
     ports:
       - "2222:2222"
 

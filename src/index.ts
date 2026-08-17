@@ -17,7 +17,12 @@ import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseMaxBytes } from './output.js';
 import {
   DEFAULT_TMUX_SESSION,
+  buildInterruptScript,
+  buildJobStatusScript,
   buildProbeScript,
+  buildRunScript,
+  installHint,
+  parseJobStatus,
   parseProbeOutput,
   type TmuxMode,
   type TmuxProbe,
@@ -839,6 +844,7 @@ export async function execSshCommandWithConnection(
   command: string,
   stdin?: string,
   maxBytes: number = 8192,
+  timeoutMs: number = DEFAULT_TIMEOUT,
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
@@ -855,9 +861,9 @@ export async function execSshCommandWithConnection(
       if (!isResolved) {
         isResolved = true;
         detachShellListener?.();
-        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+        reject(new ProtocolError(ProtocolErrorCode.InternalError, `Command execution timed out after ${timeoutMs}ms`));
       }
-    }, DEFAULT_TIMEOUT);
+    }, timeoutMs);
 
     // Persistent su shell: fence the command and capture its exit code.
     if (shell) {
@@ -938,6 +944,98 @@ export async function execSshCommandWithConnection(
       });
     });
   });
+}
+
+// Resolve the execution mode, running the tmux preflight over the plain
+// conn.exec() channel when one is needed. Throws with install guidance when the
+// host has no tmux: an agent that believes state persisted when it did not
+// produces worse failures than an explicit error.
+export async function ensureMode(manager: SSHConnectionManager): Promise<TmuxMode> {
+  const mode = await manager.resolveMode(async (script) => {
+    const res = await execSshCommandWithConnection(manager, script, undefined, 0);
+    return res.content[0]?.text ?? '';
+  });
+  if (mode === 'blocked') {
+    const probe = manager.getProbe();
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
+      installHint(probe?.pm ?? null, (manager as any).sshConfig.host),
+    );
+  }
+  return mode;
+}
+
+export interface RunInTmuxOptions {
+  kind: 'exec' | 'sudo';
+  detach?: boolean;
+  maxBytes: number;
+  timeoutMs?: number;
+}
+
+// Run one command inside the persistent tmux session. The command travels over
+// the channel's stdin into a file and is only ever referenced by path, so it is
+// never interpolated into a shell string.
+export async function runInTmux(
+  manager: SSHConnectionManager,
+  command: string,
+  opts: RunInTmuxOptions,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  const session = manager.getTmuxSession();
+  const token = manager.nextToken();
+  const script = buildRunScript({ session, token, kind: opts.kind, detach: opts.detach });
+
+  try {
+    const res = await execSshCommandWithConnection(manager, script, command, opts.maxBytes, opts.timeoutMs);
+    if (opts.detach) {
+      return {
+        content: [{ type: 'text', text: `[detached] jobId=${token} — collect with job_status("${token}")` }],
+      };
+    }
+    return res;
+  } catch (err: any) {
+    // A wedged command would otherwise keep the session busy for every later
+    // call. Ctrl-C frees it; failure to send is not worth masking the timeout.
+    if (/timed out/i.test(err?.message || '')) {
+      try {
+        await execSshCommandWithConnection(manager, buildInterruptScript(session, token), undefined, 0, 5000);
+      } catch { /* best effort */ }
+    }
+    throw err;
+  }
+}
+
+export async function jobStatus(
+  manager: SSHConnectionManager,
+  jobId: string,
+  maxBytes: number,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  const script = buildJobStatusScript({ session: manager.getTmuxSession(), token: jobId });
+  const raw = await execSshCommandWithConnection(manager, script, undefined, 0);
+  const combined = raw.content[0]?.text ?? '';
+
+  // The script exits 0 in both states, so formatCommandResult returns plain
+  // stdout unless the script itself failed (exit 78 for an unknown job), in
+  // which case the marker is absent and parseJobStatus throws.
+  let status;
+  try {
+    status = parseJobStatus(combined, '');
+  } catch {
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
+      combined.includes('unknown jobId')
+        ? `unknown jobId ${jobId}`
+        : `job_status failed: ${combined.slice(0, 200)}`,
+    );
+  }
+
+  if (status.state === 'running') {
+    const head = `[running] ${status.elapsedSeconds}s — jobId=${jobId}`;
+    return { content: [{ type: 'text', text: [head, status.stdout].filter(Boolean).join('\n') }] };
+  }
+  return formatCommandResult(
+    { stdout: status.stdout, stderr: status.stderr, exitCode: status.exitCode },
+    maxBytes,
+  );
 }
 
 // Keep the old function for backward compatibility (used in tests)

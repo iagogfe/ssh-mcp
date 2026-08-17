@@ -74,10 +74,22 @@ export function buildRunScript(opts: RunScriptOptions): string {
 
   // Redirections and `$?` must survive into the tmux shell, so `$?` is escaped
   // here while `$D` and `$T` expand in the outer (channel) shell.
+  //
+  // The exec body sources the command (`.`) rather than running it as a
+  // subprocess, so `cd`/`export` mutate the persistent pane shell instead of a
+  // throwaway one. But `.` runs in the CURRENT shell: if the command calls the
+  // real `exit` builtin, POSIX has that terminate the pane shell itself — and
+  // since it's the session's only pane, tmux tears the whole session down with
+  // it, wedging every later call. Shadowing `exit` as a function that `return`s
+  // instead turns it back into "stop the sourced script", matching what an
+  // ad-hoc command's caller actually expects. It is unset again once the exit
+  // code is captured, so it never leaks into a human attaching to the same
+  // session. sudo's body runs the command as a real subprocess (`sh`), where
+  // `exit` already only ends that subprocess, so it needs no such shadow.
   const body =
     kind === 'sudo'
       ? `sudo -n sh '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
-      : `. '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`;
+      : `exit() { return \\$1; }; . '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unset -f exit`;
 
   // The timestamp write must be atomic: a poll landing between create and
   // write of a direct `>` redirect would see an existing-but-empty start
@@ -110,9 +122,29 @@ export function buildRunScript(opts: RunScriptOptions): string {
 
 // Sent after a command times out, so the wedged command dies and the session
 // stays usable for the next call.
-export function buildInterruptScript(session: string): string {
+//
+// When the timed-out command's own token is known, this also plants a
+// synthetic completion marker for it. Ctrl-C aborts the whole sourced compound
+// line (see buildRunScript) *before* it reaches its `echo $? > rc.$T`, so the
+// outer channel script that sent that command -- already abandoned by the
+// caller after its own timeout, but still alive on the remote host, still
+// blocked in `while [ ! -s "$D/rc.$T" ]; do sleep 0.1; done` -- would otherwise
+// never see rc.$T appear and would poll forever, leaking a process for the
+// life of the remote host. Writing rc.$T here (only if nothing already has:
+// a real completion racing in first must win) lets that orphaned poller
+// finish its own cleanup and exit normally. 130 is the conventional
+// 128+SIGINT exit code.
+export function buildInterruptScript(session: string, token?: string): string {
   assertSessionName(session);
-  return `tmux send-keys -t ${session} C-c 2>/dev/null || true\n`;
+  const lines = [`tmux send-keys -t ${session} C-c 2>/dev/null || true`];
+  if (token !== undefined) {
+    assertToken(token);
+    lines.push(
+      `D=$(tmux show-environment -t ${session} SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')`,
+      `[ -n "$D" ] && [ ! -s "$D/rc.${token}" ] && { printf '130' > "$D/rc.${token}.tmp" 2>/dev/null && mv "$D/rc.${token}.tmp" "$D/rc.${token}" 2>/dev/null; } || true`,
+    );
+  }
+  return lines.join('\n') + '\n';
 }
 
 export interface TmuxProbe {
