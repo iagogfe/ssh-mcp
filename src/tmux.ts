@@ -85,6 +85,16 @@ function preamble(session: string): string {
     // check, and no second guard is needed outside the `if`.
     '  case "$D" in *[\\\'\\"\\ ]*) echo "ssh-mcp: unsafe workdir path: $D" >&2; exit 78;; esac',
     `  tmux set-environment -t ${session} SSH_MCP_DIR "$D"`,
+    // Reclaim workdirs left behind by sessions that are gone. The per-workdir
+    // prune below only ever sees the live session's own directory, so a dir
+    // whose session died is never touched again -- 60 had accumulated in /tmp on
+    // one host. A directory's mtime moves on every command that creates or
+    // removes a token file, so 7 days without one means nothing has used it for
+    // a week; a session idle that long simply gets its workdir recreated on the
+    // next command by the `[ ! -d "$D" ]` check above. This runs only when a new
+    // workdir is created -- rare, and the same event that produces the litter --
+    // because scanning /tmp on every command would cost latency for nothing.
+    `  find "\${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'ssh-mcp.*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true`,
     'fi',
     'find "$D" -type f -mtime +7 -delete 2>/dev/null || true',
   ].join('\n');
@@ -157,7 +167,15 @@ export function buildRunScript(opts: RunScriptOptions): string {
   // file. Writing to a temp name and renaming into place means start.$T is
   // never observable half-written (rename() is atomic within a directory).
   const payload = detach
-    ? `date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'; { ${body}; } &`
+    // The job is backgrounded inside a subshell that the pane shell then runs in
+    // the FOREGROUND: the subshell exits immediately, so the pane's job table
+    // never holds an entry for the real job. Without that, bash announces the
+    // completion ("[1]+ Done { shopt -s expand_aliases; ... }") whenever it next
+    // reaps it -- and if an unrelated command is running at that moment, the
+    // announcement lands in THAT command's stderr, leaking this script's own
+    // payload text to the caller. Reproduced 4/4 by detaching a 2 s job and
+    // running a 5 s command alongside it.
+    ? `date +%s > '$D/start.$T.tmp' && mv '$D/start.$T.tmp' '$D/start.$T'; ( { ${body}; } & )`
     : body;
 
   const lines = [

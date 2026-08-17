@@ -87,6 +87,24 @@ describe('buildRunScript', () => {
     expect(s.indexOf('exit 78')).toBeLessThan(s.indexOf('tmux set-environment -t ssh-mcp SSH_MCP_DIR'));
   });
 
+  // The per-workdir prune only ever scans the live session's own directory, so a
+  // workdir left behind by a session that died is never reclaimed -- 60 of them
+  // had accumulated in /tmp on one host. Sweeping sibling ssh-mcp.* directories
+  // happens only when a new workdir is created, which is both rare and the same
+  // event that produces the litter; doing it per command would scan /tmp on the
+  // latency-critical path for no gain.
+  it('sweeps stale sibling workdirs when creating a new one', () => {
+    const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec' });
+    expect(s).toMatch(/-maxdepth 1 -type d -name .ssh-mcp\.\*./);
+    expect(s).toContain('-mtime +7');
+    // Inside the creation branch, not on every command.
+    const sweep = s.indexOf('-maxdepth 1');
+    const creation = s.indexOf('mktemp -d');
+    const fi = s.indexOf('\nfi', creation);
+    expect(sweep).toBeGreaterThan(creation);
+    expect(sweep).toBeLessThan(fi);
+  });
+
   it('prunes stale files', () => {
     expect(buildRunScript(base)).toContain("find \"$D\" -type f -mtime +7 -delete");
   });
