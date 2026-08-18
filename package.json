@@ -18,6 +18,7 @@
   "files": [
     "build",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "SECURITY.md"
   ],
