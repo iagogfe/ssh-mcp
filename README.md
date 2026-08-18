@@ -373,6 +373,8 @@ A bare `exit` at the sourced command's own top level (not inside a function you 
 
 ### Breaking changes in 2.0.0
 
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
 - **tmux is now required by default.** A host without it fails loudly, with an install command, instead of silently running the old stateless per-command behavior. Pass `--noTmux` to opt back into 1.x behavior.
 - `exec` gains a `detach` parameter.
 - `job_status` is a new tool (tmux mode only).
