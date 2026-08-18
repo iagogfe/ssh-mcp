@@ -33,6 +33,7 @@ This is a fork of [tufantunc/ssh-mcp](https://github.com/tufantunc/ssh-mcp) — 
 ## Features
 
 - MCP-compliant server exposing SSH capabilities
+- Two targeting modes: pin one host with `--host`/`--user`, or route by client name with `--clientMap`
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
 - Built with TypeScript and the official MCP SDK v2 — serves the [2026-07-28 protocol revision](https://modelcontextprotocol.io/specification/2026-07-28) and still accepts 2025-era clients
@@ -83,7 +84,7 @@ By default `exec` and `sudo-exec` run inside a persistent `tmux` session on the 
     - `jobId` (required): The `jobId` returned by `exec` with `detach: true`
     - `client` (optional): Client whose session holds the job. Omit it when the server is pinned to a single host.
     - `maxBytes` (optional): Truncate output to this many bytes before head+tail truncation; `0` disables.
-  - **Result format:** While the job is still running, returns its elapsed time and a tail of its output so far. Once it has finished, returns the full output and exit code (in the same `[exit N]`/stderr footer format as `exec`) and frees the job's files on the remote host.
+  - **Result format:** While the job is still running, returns its elapsed time and a tail of its output so far. Once it has finished, returns the full output and exit code (in the same `[exit N]`/stderr footer format as `exec`) and frees the job's files on the remote host — so a finished job can be collected exactly once; polling it again reports an unknown `jobId`.
 
 ## Installation
 
@@ -150,24 +151,31 @@ To keep credentials out of the process list (`ps`) and out of committed MCP clie
 
 | Variable | Equivalent flag |
 |---|---|
-| `SSH_MCP_USER` | SSH username used for the resolved host |
-| `SSH_MCP_PASSWORD` | SSH password used for the resolved host |
-| `SSH_MCP_CLIENT_MAP` | Path to the client/host inventory (enables inventory mode) |
+| `SSH_MCP_HOST` | `--host` |
 | `SSH_MCP_PORT` | `--port` |
-| `SSH_MCP_PASSWORD` | `--password` (legacy/general configuration) |
+| `SSH_MCP_USER` | `--user` |
+| `SSH_MCP_PASSWORD` | `--password` |
 | `SSH_MCP_KEY_PATH` | `--key` |
+| `SSH_MCP_CLIENT_MAP` | `--clientMap` (enables inventory mode) |
 | `SSH_MCP_SU_PASSWORD` | `--suPassword` |
 | `SSH_MCP_SUDO_PASSWORD` | `--sudoPassword` |
 | `SSH_MCP_HOST_FINGERPRINT` | `--hostFingerprint` |
 | `SSH_MCP_KNOWN_HOSTS` | `--knownHosts` |
 | `SSH_MCP_INSECURE_HOST_KEY=1` | `--insecureHostKey` |
+| `SSH_MCP_NO_TMUX=1` | `--noTmux` |
+| `SSH_MCP_TMUX_SESSION` | `--tmuxSession` |
+| `SSH_MCP_MAX_OUTPUT_BYTES` | `--maxOutputBytes` |
+| `SSH_MCP_MAX_CONCURRENT` | `--maxConcurrent` |
+
+`--disableSudo`, `--timeout` and `--maxChars` are flags only; they have no
+environment variable.
 
 > ⚠️ **Do not put passwords in a `--scope project` MCP config**, since that writes the secret in plaintext into a `.mcp.json` file that is typically committed to your repository. Prefer SSH keys, environment variables, or `--scope local`/`--scope user`.
 
 
-Defina as credenciais somente no ambiente do processo, fora de arquivos de configuração. Não persista os valores em shell profile, `.mcp.json`, Markdown ou scripts compartilhados.
+Set credentials in the process environment only, never in configuration files. Do not persist them in a shell profile, in `.mcp.json`, in Markdown, or in shared scripts.
 
-Exemplo com autenticação por senha:
+Password authentication:
 
 ```bash
 export SSH_MCP_USER='<SSH user>'
@@ -176,7 +184,7 @@ export SSH_MCP_CLIENT_MAP='./config/client-map.md'
 ssh-mcp --timeout=30000
 ```
 
-Exemplo com autenticação por chave:
+Key authentication:
 
 ```bash
 export SSH_MCP_USER='<SSH user>'
@@ -186,7 +194,7 @@ ssh-mcp --key=/path/to/private/key --timeout=30000
 
 Não defina `SSH_MCP_PASSWORD` no exemplo por chave: quando senha e chave estão configuradas, a senha tem precedência e a chave é ignorada.
 
-O arquivo de configuração MCP deve conter somente o comando do wrapper, sem credenciais:
+The MCP configuration file should contain only the wrapper command, with no credentials:
 
 ```json
 {
@@ -236,15 +244,17 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp --timeout=120000 --maxChars=
 
 **With Sudo and Su Support:**
 ```bash
-export SSH_MCP_ENABLE_SUDO=1
 export SSH_MCP_SUDO_PASSWORD='<sudo password>'
 export SSH_MCP_SU_PASSWORD='<root password>'
 claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 ```
 
-Defina apenas a variável de elevação necessária: `SSH_MCP_SUDO_PASSWORD`
-para sudo com senha e `SSH_MCP_SU_PASSWORD` quando o fluxo usar `su`.
-Mantenha esses valores somente no ambiente do processo que inicia o MCP.
+`sudo-exec` is exposed by default; there is no variable to turn it on. Pass
+`--disableSudo` at startup to hide it. Set only the elevation variable your
+flow needs: `SSH_MCP_SUDO_PASSWORD` for password-protected sudo, and
+`SSH_MCP_SU_PASSWORD` when the connection should run through a persistent
+`su -` root shell. Keep both in the environment of the process that starts
+the server.
 
 **Installation Scopes:**
 
@@ -315,6 +325,24 @@ The server resolves one mode per connection, in this order:
 ### Commands serialize
 
 A non-detached `exec` call, or a passwordless `sudo-exec` call, sends its command to the tmux pane and waits for it to finish. Because the pane's shell reads and executes one line at a time, two such calls issued in parallel against the same destination queue up on the shared pane and run one after another, not concurrently — a slow command blocks every other synchronous call against that destination until it finishes or times out. `exec(detach: true)` is the escape hatch: a backgrounded command frees the pane immediately, so it doesn't block other calls; poll its result later with `job_status`, which reads the job's result files directly and does not itself wait on the pane.
+
+### Concurrent calls and the channel cap
+
+Serialization above is about the pane. Underneath it, every tool call opens its
+own SSH channel, and `sshd` caps those with `MaxSessions` — 10 by default —
+refusing the excess with a bare `Channel open failure` that an agent can do
+nothing with.
+
+The server holds callers in a client-side queue instead, admitting at most
+`--maxConcurrent` (default 8, leaving headroom under the usual 10 for the
+elevation shell and an interrupt). Queueing costs nothing here: in tmux mode
+the commands would serialize on the pane anyway. A refused open is also
+retried, which is safe for that specific error and no other — `sshd` rejects
+the session before anything runs, so the command provably never reached the
+host and a retry cannot double-execute.
+
+Lower `--maxConcurrent` (or `SSH_MCP_MAX_CONCURRENT`) for a host with a
+stricter `MaxSessions`.
 
 ### Known limitation: `exit` inside your own function
 
