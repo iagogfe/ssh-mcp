@@ -1,7 +1,7 @@
 # SSH MCP Server
 
-[![NPM Version](https://img.shields.io/npm/v/@iagogfe/ssh-mcp)](https://www.npmjs.com/package/@iagogfe/ssh-mcp)
-[![Node Version](https://img.shields.io/node/v/@iagogfe/ssh-mcp)](https://nodejs.org/)
+[![Release](https://img.shields.io/github/v/release/iagogfe/ssh-mcp)](https://github.com/iagogfe/ssh-mcp/releases)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
 [![License](https://img.shields.io/github/license/iagogfe/ssh-mcp)](./LICENSE)
 [![CI](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/iagogfe/ssh-mcp/actions/workflows/ci.yml)
 [![Security](https://github.com/iagogfe/ssh-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/iagogfe/ssh-mcp/actions/workflows/security.yml)
@@ -90,19 +90,28 @@ By default `exec` and `sudo-exec` run inside a persistent `tmux` session on the 
 
 Requires **Node.js 20 or newer**.
 
-No install step is needed to use the server — MCP clients run it through `npx` (see [Client Setup](#client-setup)). The Planetfone deployment uses the global wrapper at `ssh-mcp`, which starts without a fixed host and reads clients from `client-map.md`:
-
-```bash
-npx -y @iagogfe/ssh-mcp -- --disableSudo
-```
-
-To hack on it locally:
+This package is not on npm. Clone and build it, then point your MCP client at
+the built entry point:
 
 ```bash
 git clone https://github.com/iagogfe/ssh-mcp.git
 cd ssh-mcp
 npm install
 npm run build
+```
+
+That produces `build/index.js`, which is what every example below runs with
+`node`. Use an absolute path — MCP clients do not necessarily start the server
+from the directory you cloned into.
+
+Optionally, `npm link` from the clone puts an `ssh-mcp` command on your `PATH`,
+so you can write `ssh-mcp` instead of `node /path/to/ssh-mcp/build/index.js`
+everywhere below.
+
+To pick up a new version, pull and rebuild:
+
+```bash
+git pull && npm run build
 ```
 
 ## Client Setup
@@ -181,7 +190,7 @@ Password authentication:
 export SSH_MCP_USER='<SSH user>'
 export SSH_MCP_PASSWORD='<SSH password>'
 export SSH_MCP_CLIENT_MAP='./config/client-map.md'
-ssh-mcp --timeout=30000
+node /path/to/ssh-mcp/build/index.js --timeout=30000
 ```
 
 Key authentication:
@@ -189,10 +198,10 @@ Key authentication:
 ```bash
 export SSH_MCP_USER='<SSH user>'
 export SSH_MCP_CLIENT_MAP='./config/client-map.md'
-ssh-mcp --key=/path/to/private/key --timeout=30000
+node /path/to/ssh-mcp/build/index.js --key=/path/to/private/key --timeout=30000
 ```
 
-Não defina `SSH_MCP_PASSWORD` no exemplo por chave: quando senha e chave estão configuradas, a senha tem precedência e a chave é ignorada.
+Do not set `SSH_MCP_PASSWORD` in the key example: when both a password and a key are configured, the password wins and the key is ignored.
 
 The MCP configuration file should contain only the wrapper command, with no credentials:
 
@@ -200,7 +209,8 @@ The MCP configuration file should contain only the wrapper command, with no cred
 {
     "mcpServers": {
         "ssh-mcp": {
-            "command": "ssh-mcp"
+            "command": "node",
+            "args": ["/path/to/ssh-mcp/build/index.js"]
         }
     }
 }
@@ -210,7 +220,7 @@ Example tool call:
 
 ```json
 {
-  "client": "Nome do Cliente",
+  "client": "Client Name",
   "command": "asterisk -rx 'core show version'"
 }
 ```
@@ -222,31 +232,31 @@ You can add this MCP server to Claude Code using the `claude mcp add` command. T
 **Basic Installation:**
 
 ```bash
-claude mcp add --transport stdio ssh-mcp -- ssh-mcp
+claude mcp add --transport stdio ssh-mcp -- node /path/to/ssh-mcp/build/index.js
 ```
 
 **Installation Examples:**
 
 **With Password Authentication:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- ssh-mcp
+claude mcp add --transport stdio ssh-mcp -- node /path/to/ssh-mcp/build/index.js
 ```
 
 **With SSH Key Authentication:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- ssh-mcp --key=/path/to/private/key
+claude mcp add --transport stdio ssh-mcp -- node /path/to/ssh-mcp/build/index.js --key=/path/to/private/key
 ```
 
 **With Custom Timeout and No Character Limit:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- ssh-mcp --timeout=120000 --maxChars=none
+claude mcp add --transport stdio ssh-mcp -- node /path/to/ssh-mcp/build/index.js --timeout=120000 --maxChars=none
 ```
 
 **With Sudo and Su Support:**
 ```bash
 export SSH_MCP_SUDO_PASSWORD='<sudo password>'
 export SSH_MCP_SU_PASSWORD='<root password>'
-claude mcp add --transport stdio ssh-mcp -- ssh-mcp
+claude mcp add --transport stdio ssh-mcp -- node /path/to/ssh-mcp/build/index.js
 ```
 
 `sudo-exec` is exposed by default; there is no variable to turn it on. Pass
@@ -262,23 +272,23 @@ You can specify the scope when adding the server:
 
 - **Local scope** (default): For personal use in the current project
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope local -- ssh-mcp
+  claude mcp add --transport stdio ssh-mcp --scope local -- node /path/to/ssh-mcp/build/index.js
   ```
 
 - **Project scope**: Share with your team via `.mcp.json` file. ⚠️ This file is usually committed to your repository — **do not embed a password here**. Use an SSH key or the `SSH_MCP_USER`/`SSH_MCP_PASSWORD` process environment instead.
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope project -- ssh-mcp --key=/path/to/private/key
+  claude mcp add --transport stdio ssh-mcp --scope project -- node /path/to/ssh-mcp/build/index.js --key=/path/to/private/key
   ```
 
 - **User scope**: Available across all your projects
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope user -- ssh-mcp
+  claude mcp add --transport stdio ssh-mcp --scope user -- node /path/to/ssh-mcp/build/index.js
   ```
 
 
 **Verify Installation:**
 
-After adding the server, restart Claude Code and ask Cascade to execute a command:
+After adding the server, restart Claude Code and ask it to execute a command:
 ```
 "Can you run 'ls -la' on the remote server?"
 ```
