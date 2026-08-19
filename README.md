@@ -126,7 +126,7 @@ The server runs in one of two modes, and both can be configured at once.
 
 With both configured, `--host` is the default target and `client` switches away from it. `--clientMap` has no default path: a relative default would resolve against whatever working directory the MCP client happened to spawn the process in.
 
-**Planetfone environment:**
+**Inventory environment:**
 
 ```text
 SSH_MCP_USER=<SSH user>

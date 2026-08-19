@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { parseArgv, sanitizeCommand, SSHConnectionManager } from '../src/index';
-import { loadPlanetfone4Hosts } from '../src/client-map';
+import { loadClientInventory } from '../src/client-map';
 import { DestinationManagerCache } from '../src/connection-manager-cache';
 
 const dirs: string[] = [];
@@ -73,22 +73,22 @@ describe('sanitizeCommand', () => {
   });
 });
 
-describe('loadPlanetfone4Hosts', () => {
+describe('loadClientInventory', () => {
   it('reads and parses an inventory from disk', () => {
     const p = tmp('inv.md', '### Cliente A\n\n- `host-a.internal`\n\n### Cliente B\n\n- `host-b.internal`\n');
-    expect(loadPlanetfone4Hosts(p)).toEqual([
+    expect(loadClientInventory(p)).toEqual([
       { name: 'Cliente A', hosts: ['host-a.internal'] },
       { name: 'Cliente B', hosts: ['host-b.internal'] },
     ]);
   });
 
   it('names the file as the problem when it cannot be read', () => {
-    expect(() => loadPlanetfone4Hosts('/nao/existe/inv.md')).toThrow(/Unable to read/i);
+    expect(() => loadClientInventory('/nao/existe/inv.md')).toThrow(/Unable to read/i);
   });
 
   it('refuses an inventory with no usable client section', () => {
     const p = tmp('vazio.md', '# So um titulo\n\nprosa sem host nenhum\n');
-    expect(() => loadPlanetfone4Hosts(p)).toThrow(/no client sections/i);
+    expect(() => loadClientInventory(p)).toThrow(/no client sections/i);
   });
 });
 

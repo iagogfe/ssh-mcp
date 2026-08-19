@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   normalizeClientName,
-  parsePlanetfone4Hosts,
+  parseClientInventory,
   resolveClientHost,
 } from '../src/client-map';
 
@@ -32,7 +32,7 @@ Texto que não é um host.
 - \`ssh.example.net\`
 `;
 
-describe('Planetfone client inventory', () => {
+describe('client inventory', () => {
   it('normalizes case, accents, and repeated whitespace', () => {
     expect(normalizeClientName('  EXAMPLE   client  ')).toBe('example client');
   });
@@ -42,7 +42,7 @@ describe('Planetfone client inventory', () => {
   // now kept: they were previously dropped by a hardcoded single-domain suffix
   // check, which made the parser unusable for any other deployment.
   it('parses client sections while ignoring global hosts, prose, links, and empty sections', () => {
-    expect(parsePlanetfone4Hosts(markdown)).toEqual([
+    expect(parseClientInventory(markdown)).toEqual([
       {
         name: 'Example Client',
         hosts: [
@@ -57,7 +57,7 @@ describe('Planetfone client inventory', () => {
   });
 
   it('resolves an exact normalized client name to its first host', () => {
-    const clients = parsePlanetfone4Hosts(markdown);
+    const clients = parseClientInventory(markdown);
 
     expect(resolveClientHost(clients, 'Example Client')).toBe('fixture-client-004.example.com');
   });

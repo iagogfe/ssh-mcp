@@ -10,9 +10,9 @@ import { homedir } from 'os';
 import { join } from 'path';
 import {
   ClientResolutionError,
-  loadPlanetfone4Hosts,
+  loadClientInventory,
   resolveClientHost,
-  type PlanetfoneClient,
+  type InventoryClient,
 } from './client-map.js';
 import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseLimit } from './output.js';
@@ -729,10 +729,10 @@ export class SSHConnectionManager {
   }
 }
 
-let configuredClients: PlanetfoneClient[] | null = null;
+let configuredClients: InventoryClient[] | null = null;
 const connectionManagers = new DestinationManagerCache<SSHConnectionManager>();
 
-function getConfiguredClients(): PlanetfoneClient[] {
+function getConfiguredClients(): InventoryClient[] {
   if (!CLIENT_MAP_PATH) {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,
@@ -740,7 +740,7 @@ function getConfiguredClients(): PlanetfoneClient[] {
     );
   }
   if (!configuredClients) {
-    configuredClients = loadPlanetfone4Hosts(CLIENT_MAP_PATH);
+    configuredClients = loadClientInventory(CLIENT_MAP_PATH);
   }
   return configuredClients;
 }
