@@ -103,6 +103,16 @@ describe('buildConnectConfig host key verifier', () => {
     expect(cfg.hostVerifier(key)).toBe(false);
   });
 
+  it('enables SSH keepalive, so an idle connection is not silently dropped', () => {
+    // This server holds connections open across long gaps between tool calls,
+    // so idle is the normal state. Without keepalive the peer's own idle timer
+    // closes the connection and this side only notices on the next call, which
+    // then pays a full handshake first.
+    const cfg = buildConnectConfig(base);
+    expect(cfg.keepaliveInterval).toBeGreaterThan(0);
+    expect(cfg.keepaliveCountMax).toBeGreaterThan(0);
+  });
+
   it('passes the ssh2 connect fields through untouched', () => {
     const cfg = buildConnectConfig({ ...base, password: 'secret' });
     expect(cfg.host).toBe('10.0.0.1');

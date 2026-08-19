@@ -85,22 +85,6 @@ function preamble(session: string): string {
     // check, and no second guard is needed outside the `if`.
     '  case "$D" in *[\\\'\\"\\ ]*) echo "ssh-mcp: unsafe workdir path: $D" >&2; exit 78;; esac',
     `  tmux set-environment -t ${session} SSH_MCP_DIR "$D"`,
-    // Reclaim workdirs left behind by sessions that are gone. The per-workdir
-    // prune below only ever sees the live session's own directory, so a dir
-    // whose session died is never touched again -- 60 had accumulated in /tmp on
-    // one host. A directory's mtime moves on every command that creates or
-    // removes a token file, so 7 days without one means nothing has used it for
-    // a week; a session idle that long simply gets its workdir recreated on the
-    // next command by the `[ ! -d "$D" ]` check above. This runs only when a new
-    // workdir is created -- rare, and the same event that produces the litter --
-    // because scanning /tmp on every command would cost latency for nothing.
-    // Swept in the directory the workdir was just created in, derived from $D
-    // rather than re-expanding TMPDIR. $D has already passed the quote/space
-    // guard above, so the one line here that deletes anything works from a
-    // value that was validated rather than a raw environment variable.
-    // -maxdepth 1 plus the ssh-mcp.* name keeps the blast radius to siblings of
-    // our own workdir.
-    '  find "$(dirname "$D")" -maxdepth 1 -type d -name \'ssh-mcp.*\' -mtime +7 -exec rm -rf {} + 2>/dev/null || true',
     'fi',
     'find "$D" -type f -mtime +7 -delete 2>/dev/null || true',
   ].join('\n');
@@ -315,6 +299,20 @@ export function buildProbeScript(): string {
     `    command -v "$m" >/dev/null 2>&1 && { printf 'pm=%s\\n' "$m"; break; }`,
     '  done',
     'fi',
+    // Reclaim workdirs left behind by sessions that died. This used to sit in
+    // the command preamble, where it only ran while a workdir was being
+    // created -- so a long-lived session never swept, and directories from
+    // earlier deaths piled up untouched.
+    //
+    // Deliberately not in the preamble's hot path: measured on a live host this
+    // find costs 4 ms, the same order as the whole command latency the adaptive
+    // poll was tuned to protect. Once per connection it is free; once per
+    // command it would be a tax on every call.
+    //
+    // -mtime +7 keeps an in-use workdir safe: its files are rewritten on every
+    // command, so an active session's directory is never seven days stale. One
+    // that is gets swept, and the next call transparently recreates it.
+    `find "\${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'ssh-mcp.*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true`,
     '',
   ].join('\n');
 }

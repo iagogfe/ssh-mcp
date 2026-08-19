@@ -87,22 +87,16 @@ describe('buildRunScript', () => {
     expect(s.indexOf('exit 78')).toBeLessThan(s.indexOf('tmux set-environment -t ssh-mcp SSH_MCP_DIR'));
   });
 
-  // The per-workdir prune only ever scans the live session's own directory, so a
-  // workdir left behind by a session that died is never reclaimed -- 60 of them
-  // had accumulated in /tmp on one host. Sweeping sibling ssh-mcp.* directories
-  // happens only when a new workdir is created, which is both rare and the same
-  // event that produces the litter; doing it per command would scan /tmp on the
-  // latency-critical path for no gain.
-  it('sweeps stale sibling workdirs when creating a new one', () => {
+  // The per-workdir prune below only ever scans the live session's own
+  // directory, so a workdir left behind by a session that died is never
+  // reclaimed. Sweeping those siblings is the probe's job -- once per
+  // connection -- not this script's.
+  it('does not scan for stale workdirs on every command', () => {
+    // The sweep belongs to the probe, which runs once per connection. Measured
+    // on a live host at 4 ms, it is the same order as the command latency the
+    // adaptive poll was tuned to protect -- too much to pay per call.
     const s = buildRunScript({ session: 'ssh-mcp', token: 'k1z', kind: 'exec' });
-    expect(s).toMatch(/-maxdepth 1 -type d -name .ssh-mcp\.\*./);
-    expect(s).toContain('-mtime +7');
-    // Inside the creation branch, not on every command.
-    const sweep = s.indexOf('-maxdepth 1');
-    const creation = s.indexOf('mktemp -d');
-    const fi = s.indexOf('\nfi', creation);
-    expect(sweep).toBeGreaterThan(creation);
-    expect(sweep).toBeLessThan(fi);
+    expect(s).not.toContain('-maxdepth 1');
   });
 
   it('prunes stale files', () => {
@@ -267,6 +261,17 @@ describe('buildInterruptScript', () => {
 });
 
 describe('buildProbeScript', () => {
+  it('reclaims workdirs left by dead sessions, after the markers it must not disturb', () => {
+    const s = buildProbeScript();
+    expect(s).toMatch(/-maxdepth 1 -type d -name .ssh-mcp\.\*./);
+    expect(s).toContain('-mtime +7');
+    // Ordered last on purpose: the probe's output is parsed by marker, and this
+    // line runs a command that could in principle write to stdout. Anything it
+    // emitted before the markers would land between the leading newline and
+    // `tmux=`, which is exactly the gluing that broke marker isolation once.
+    expect(s.indexOf('-maxdepth 1')).toBeGreaterThan(s.indexOf('tmux=%s'));
+  });
+
   it('checks tmux and falls back to detecting a package manager', () => {
     const s = buildProbeScript();
     expect(s).toContain('command -v tmux');
