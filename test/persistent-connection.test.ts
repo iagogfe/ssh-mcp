@@ -1,6 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SSHConnectionManager, execSshCommandWithConnection } from '../src/index';
-import { Client as SSHClient } from 'ssh2';
 
 const host = process.env.SSH_HOST || '127.0.0.1';
 const port = Number(process.env.SSH_PORT || 2222);

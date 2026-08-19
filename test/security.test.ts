@@ -23,8 +23,13 @@ describe('sanitizeDescription (#5 newline injection)', () => {
     expect(sanitizeDescription('a\r\nb\nc')).toBe('a b c');
   });
 
-  it('still escapes # and trims', () => {
-    expect(sanitizeDescription('  has # hash  ')).toBe('has \\# hash');
+  it('trims, and leaves a # alone because it is already inside a comment', () => {
+    // The result is appended as `<command> # <description>`, so everything here
+    // is past the comment marker and a further `#` means nothing to the shell.
+    // Escaping it was the only thing that ever put a backslash in this output,
+    // which is what CodeQL's incomplete-sanitization rule flagged.
+    expect(sanitizeDescription('  has # hash  ')).toBe('has # hash');
+    expect(sanitizeDescription('trailing backslash \\')).toBe('trailing backslash \\');
   });
 
   it('contains no CR or LF for any input', () => {

@@ -11,7 +11,6 @@
 //   - McpServer, so registerTool hands the handler straight to the test.
 // Everything between them is the real src/index.ts.
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { EventEmitter } from 'events';
 import { mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';

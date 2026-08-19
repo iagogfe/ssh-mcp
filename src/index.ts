@@ -183,11 +183,17 @@ function sanitizePassword(password: string | undefined): string | undefined {
   return password;
 }
 
-// Strip CR/LF (and collapse whitespace) from a description before appending it as
-// a shell comment. Without this, a newline in the description would terminate the
-// comment and inject an extra command line into the shell.
+// Strip CR/LF from a description before appending it as a shell comment.
+// Without this, a newline in the description would end the comment and inject an
+// extra command line into the shell.
+//
+// `#` is deliberately NOT escaped: the text already sits inside a comment, where
+// a `#` means nothing, and escaping it was the only reason a backslash ever
+// reached the output -- which is what CodeQL's incomplete-sanitization rule
+// flagged. A trailing backslash cannot splice the next line either: verified on
+// bash, dash and sh that a comment ends at its newline regardless.
 export function sanitizeDescription(description: string): string {
-  return description.replace(/[\r\n]+/g, ' ').replace(/#/g, '\\#').trim();
+  return description.replace(/[\r\n]+/g, ' ').trim();
 }
 
 // Build a `printf` invocation that emits a unique sentinel line. The embedded ""
@@ -210,6 +216,16 @@ export function sshKeyFingerprintSha256(key: Buffer): string {
 // Whether a raw host key buffer matches an expected fingerprint. Accepts modern
 // SHA256 fingerprints ("SHA256:..." or bare base64) and legacy MD5 hex
 // fingerprints ("MD5:aa:bb:..." or "aa:bb:...").
+// Drops base64 '=' padding. A loop rather than /=+$/: that regex backtracks
+// quadratically on a long run of '=', which CodeQL flags as polynomial ReDoS.
+// The input here is an operator-supplied --hostFingerprint rather than anything
+// an attacker reaches at runtime, so this is cheap insurance, not a live fix.
+function stripTrailingPadding(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '=') end -= 1;
+  return value.slice(0, end);
+}
+
 export function matchesFingerprint(key: Buffer, expected: string): boolean {
   const exp = expected.trim();
   const isMd5 = /^MD5:/i.test(exp) || /^([0-9a-f]{2}:){15}[0-9a-f]{2}$/i.test(exp);
@@ -218,8 +234,8 @@ export function matchesFingerprint(key: Buffer, expected: string): boolean {
     const want = exp.replace(/^MD5:/i, '').replace(/:/g, '').toLowerCase();
     return got === want;
   }
-  const got = createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
-  const want = exp.replace(/^SHA256:/i, '').replace(/=+$/, '');
+  const got = stripTrailingPadding(createHash('sha256').update(key).digest('base64'));
+  const want = stripTrailingPadding(exp.replace(/^SHA256:/i, ''));
   return got === want;
 }
 
@@ -823,13 +839,6 @@ const CLIENT_FIELD = {
     ? z.string().optional().describe('Client name from the configured inventory. Omit to use the default target.')
     : z.string().optional(),
 };
-const maxBytesField = (withDefault: boolean) =>
-  z.number().int().optional().describe(
-    withDefault
-      ? 'Max output bytes before head+tail truncation; 0 disables. Defaults to server config.'
-      : 'Max output bytes before head+tail truncation; 0 disables.',
-  );
-
 // One definition for the three tools that take it. The old text also promised
 // it "defaults to server config", which every optional field does.
 const MAXBYTES_FIELD = z.number().int().optional()
