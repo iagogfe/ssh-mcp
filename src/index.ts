@@ -332,6 +332,14 @@ export interface SSHConfig {
 // accept an unverified host key (ssh2 auto-accepts when no verifier is supplied).
 export function buildConnectConfig(sshConfig: SSHConfig): any {
   const cfg: any = { ...sshConfig };
+  // SSH-level keepalive. Without it an idle connection is dropped by the
+  // server's own ClientAliveInterval (or by a NAT/firewall idle timer) and this
+  // side only finds out on the next tool call, which then pays a full handshake
+  // before it can run. This server is built to hold connections open across
+  // long gaps between calls, so idleness is the normal state, not the exception.
+  // 15s * 3 unanswered = ~45s to notice a dead peer.
+  cfg.keepaliveInterval = 15000;
+  cfg.keepaliveCountMax = 3;
   const { host, port, hostFingerprint, insecureHostKey } = sshConfig;
   const knownHostsPath = sshConfig.knownHostsPath || join(homedir(), '.ssh', 'known_hosts');
 
