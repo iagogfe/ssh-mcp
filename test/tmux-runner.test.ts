@@ -5,7 +5,7 @@
 // stream exercises the JavaScript around the transport -- mode resolution,
 // detach reply shaping, job-status parsing -- while the shell semantics
 // themselves are covered by the live suite.
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'events';
 import { SSHConnectionManager, ensureMode, runInTmux, jobStatus } from '../src/index';
 
