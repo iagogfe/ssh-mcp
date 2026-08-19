@@ -26,6 +26,9 @@ jobs:
   build:
     name: Build e testes (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # pull autenticado da imagem de serviço no ghcr
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +43,13 @@ jobs:
         # de serviço executa código no runner igual a uma action. Atualizar =
         # trocar o digest e o comentário junto.
         image: ghcr.io/linuxserver/openssh-server@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c # latest em 2026-08-17
+        # Pull autenticado. Anônimo, o ghcr limita por taxa, e os três jobs da
+        # matriz (Node 20/22/24) puxam a mesma imagem ao mesmo tempo — o que
+        # rendeu um `toomanyrequests: Docker pull failed` em main. O token
+        # embutido do próprio job basta; não é segredo novo.
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           USER_NAME: test
           PASSWORD_ACCESS: "true"
