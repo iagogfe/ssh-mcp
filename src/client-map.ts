@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-export interface PlanetfoneClient {
+export interface InventoryClient {
   name: string;
   hosts: string[];
 }
@@ -25,9 +25,9 @@ const clientHeading = /^###\s+(.+?)\s*$/;
 const anyHeading = /^#{1,6}\s+/;
 const hostPattern = /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b/gi;
 
-export function parsePlanetfone4Hosts(markdown: string): PlanetfoneClient[] {
-  const clients: PlanetfoneClient[] = [];
-  let current: PlanetfoneClient | undefined;
+export function parseClientInventory(markdown: string): InventoryClient[] {
+  const clients: InventoryClient[] = [];
+  let current: InventoryClient | undefined;
 
   const flush = () => {
     if (current && current.hosts.length > 0) {
@@ -72,25 +72,25 @@ export function parsePlanetfone4Hosts(markdown: string): PlanetfoneClient[] {
   flush();
 
   if (clients.length === 0) {
-    throw new Error('Planetfone inventory contains no client sections with hosts');
+    throw new Error('Inventory contains no client sections with hosts');
   }
   return clients;
 }
 
-export function loadPlanetfone4Hosts(filePath: string): PlanetfoneClient[] {
+export function loadClientInventory(filePath: string): InventoryClient[] {
   let markdown: string;
   try {
     markdown = readFileSync(filePath, 'utf8');
   } catch {
-    throw new Error('Unable to read Planetfone inventory file');
+    throw new Error('Unable to read the client inventory file');
   }
-  return parsePlanetfone4Hosts(markdown);
+  return parseClientInventory(markdown);
 }
 
 // Returns the client's first host. The client's own name and its remaining
 // hosts were once returned alongside it and never read by anyone.
 export function resolveClientHost(
-  clients: readonly PlanetfoneClient[],
+  clients: readonly InventoryClient[],
   query: string,
 ): string {
   const normalizedQuery = normalizeClientName(query);

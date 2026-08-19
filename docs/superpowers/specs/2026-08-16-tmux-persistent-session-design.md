@@ -10,7 +10,7 @@ Every tool call runs its command in a fresh remote shell, so no state survives
 between calls. An agent that runs `cd /var/log` and then `tail syslog` finds
 itself back in `$HOME` for the second command.
 
-Measured on a live host (`192.168.1.27`, three consecutive `exec` calls):
+Measured on a live host (three consecutive `exec` calls):
 
 | Observation | Evidence |
 |---|---|
