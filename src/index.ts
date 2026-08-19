@@ -16,6 +16,7 @@ import {
 } from './client-map.js';
 import { DestinationManagerCache } from './connection-manager-cache.js';
 import { formatCommandResult, parseLimit } from './output.js';
+import { TunnelRegistry } from './tunnel.js';
 import {
   DEFAULT_TMUX_SESSION,
   assertSessionName,
@@ -84,6 +85,9 @@ export const PASSWORD = resolveSecret(argvConfig.password, process.env.SSH_MCP_P
 const SUPASSWORD = resolveSecret(argvConfig.suPassword, process.env.SSH_MCP_SU_PASSWORD);
 const SUDOPASSWORD = resolveSecret(argvConfig.sudoPassword, process.env.SSH_MCP_SUDO_PASSWORD);
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
+// Opting out of tunnelling, mirroring --disableSudo: a tunnel is a network
+// capability the agent gains, and an operator may want the shell without it.
+const DISABLE_TUNNEL = argvConfig.disableTunnel !== undefined;
 const KEY = argvConfig.key ?? process.env.SSH_MCP_KEY_PATH;
 // --noTmux forces the old stateless per-command exec path even when the host
 // has tmux available. --tmuxSession picks which session name to attach/create,
@@ -1081,6 +1085,73 @@ if (TMUX_ATTEMPTED) {
       });
 }
 
+// Local port forwarding. Registered unless --disableTunnel, and in every mode:
+// it never touches the session shell, so tmux/su/stateless are all the same to
+// it. The listener lives in this process, so tunnels die with the server --
+// which is the honest lifetime for something that cannot outlive its socket.
+const tunnels = new TunnelRegistry();
+
+if (!DISABLE_TUNNEL) {
+  server.registerTool("tunnel_open", { description:
+      "Forward a local port to a service the remote host can reach (ssh -L), for something " +
+      "bound to the server's own loopback: a database, a cache, an internal UI. Binds " +
+      "127.0.0.1 only and returns the port to connect to.",
+      inputSchema: z.object({
+        ...CLIENT_FIELD,
+        remoteHost: z.string().describe("Target as the SERVER resolves it, e.g. localhost"),
+        remotePort: z.number().int().describe("Port on remoteHost"),
+        localPort: z.number().int().optional().describe("Local port; omit for a free one"),
+      }) }, async ({ client, remoteHost, remotePort, localPort }) => {
+        try {
+          const { manager } = await getConnectionManager(client, false);
+          await manager.ensureConnected();
+          const info = await tunnels.open(
+            () => manager.getConnection() as any,
+            remoteHost,
+            remotePort,
+            localPort,
+          );
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `127.0.0.1:${info.localPort} -> ${info.remoteHost}:${info.remotePort}\n`
+                + `Close it with tunnel_close({ localPort: ${info.localPort} }).`,
+            }],
+          };
+        } catch (err: any) {
+          if (err instanceof ProtocolError) throw err;
+          throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Could not open tunnel: ${err?.message || err}`);
+        }
+      });
+
+  server.registerTool("tunnel_list", { description:
+      "List the local port forwards this server currently holds open.",
+      inputSchema: z.object({}) }, async () => {
+        const open = tunnels.list();
+        if (open.length === 0) {
+          return { content: [{ type: 'text' as const, text: 'No tunnels open.' }] };
+        }
+        const lines = open.map((t) =>
+          `127.0.0.1:${t.localPort} -> ${t.remoteHost}:${t.remotePort} (${t.activeConnections} active)`);
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      });
+
+  server.registerTool("tunnel_close", { description:
+      "Close a local port forward, dropping any connections still riding it.",
+      inputSchema: z.object({
+        localPort: z.number().int().describe("The local port reported by tunnel_open"),
+      }) }, async ({ localPort }) => {
+        const closed = tunnels.close(localPort);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: closed ? `Closed the tunnel on 127.0.0.1:${localPort}.` : `No tunnel open on local port ${localPort}.`,
+          }],
+          ...(closed ? {} : { isError: true }),
+        };
+      });
+}
+
 // New function that uses persistent connection
 // A refused channel open is transient and, crucially, means the command never
 // reached the host: sshd rejects the session before anything runs, so a retry
@@ -1360,6 +1431,7 @@ async function main() {
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
     void handle.close();
+    tunnels.closeAll();
     closeAllConnectionManagers();
     process.exit(0);
   };

@@ -10,7 +10,11 @@ import { join } from 'path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
-const BUDGET = 2600;
+// Measured at 3649 B for six tools; the headroom is for wording, not for a
+// seventh tool. Adding one should force this number to be argued for again,
+// which is the point -- when the ceiling last moved, trimming tunnel_open's
+// wording alone gave back 114 B.
+const BUDGET = 3900;
 
 async function listTools(extraArgs: string[] = []) {
   const client = new Client({ name: 'budget', version: '1.0.0' }, {});
@@ -46,7 +50,12 @@ describe('context budget', () => {
     // so prose about selecting is context spent teaching a dead end. The
     // handler's "No client inventory configured" says it at the moment it
     // matters.
-    const tools = await listTools();
+    // Only the tools that target a host take `client`. tunnel_list reports every
+    // tunnel regardless of destination, and tunnel_close is keyed by local port,
+    // so neither has a target to select.
+    const targeted = ['exec', 'sudo-exec', 'job_status', 'tunnel_open'];
+    const tools = (await listTools()).filter((t) => targeted.includes(t.name));
+    expect(tools.length).toBe(targeted.length);
     for (const t of tools) {
       const client = (t.inputSchema as any)?.properties?.client;
       expect(client, `${t.name} perdeu o parametro client`).toBeDefined();
@@ -56,7 +65,8 @@ describe('context budget', () => {
 
   it('describes it once an inventory is configured', async () => {
     const inventory = join(process.cwd(), 'test', 'fixtures', 'client-map.md');
-    const tools = await listTools([`--clientMap=${inventory}`]);
+    const targeted = ['exec', 'sudo-exec', 'job_status', 'tunnel_open'];
+    const tools = (await listTools([`--clientMap=${inventory}`])).filter((t) => targeted.includes(t.name));
     for (const t of tools) {
       const client = (t.inputSchema as any)?.properties?.client;
       expect(client?.description, `${t.name} nao descreve client com inventario`)
