@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { serveStdio, StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { McpServer, ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/server";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { createHash, createHmac, randomBytes } from 'crypto';
-import { readFileSync } from 'fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { connect as netConnect, createServer as createNetServer } from 'net';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   ClientResolutionError,
   loadClientInventory,
@@ -88,6 +89,10 @@ const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 // Opting out of tunnelling, mirroring --disableSudo: a tunnel is a network
 // capability the agent gains, and an operator may want the shell without it.
 const DISABLE_TUNNEL = argvConfig.disableTunnel !== undefined;
+// --listen=<path>: serve every MCP session from this one process over a Unix
+// socket instead of stdio. Each client connects with a stdio shim
+// (`nc -N -U <path>`), so N agent sessions cost one process instead of N.
+const LISTEN = argvConfig.listen ?? process.env.SSH_MCP_LISTEN;
 const KEY = argvConfig.key ?? process.env.SSH_MCP_KEY_PATH;
 // --noTmux forces the old stateless per-command exec path even when the host
 // has tmux available. --tmuxSession picks which session name to attach/create,
@@ -735,7 +740,23 @@ export class SSHConnectionManager {
 }
 
 let configuredClients: InventoryClient[] | null = null;
-const connectionManagers = new DestinationManagerCache<SSHConnectionManager>();
+export interface SessionState {
+  managers: DestinationManagerCache<SSHConnectionManager>;
+  tunnels: TunnelRegistry;
+}
+
+export function newSessionState(): SessionState {
+  return { managers: new DestinationManagerCache<SSHConnectionManager>(), tunnels: new TunnelRegistry() };
+}
+
+// Every live session, so a process shutdown can close all of them.
+const liveStates = new Set<SessionState>();
+
+export function closeSessionState(state: SessionState): void {
+  liveStates.delete(state);
+  state.tunnels.closeAll();
+  state.managers.closeAll();
+}
 
 function getConfiguredClients(): InventoryClient[] {
   if (!CLIENT_MAP_PATH) {
@@ -774,6 +795,7 @@ function resolveTargetHost(client: string | undefined): string {
 }
 
 async function getConnectionManager(
+  managers: DestinationManagerCache<SSHConnectionManager>,
   client: string | undefined,
   includeSudo: boolean,
 ): Promise<{ manager: SSHConnectionManager }> {
@@ -782,7 +804,7 @@ async function getConnectionManager(
     throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing required username');
   }
 
-  const manager = await connectionManagers.getOrCreateAsync(
+  const manager = await managers.getOrCreateAsync(
     host,
     PORT,
     USER,
@@ -820,7 +842,7 @@ async function getConnectionManager(
 }
 
 function closeAllConnectionManagers(): void {
-  connectionManagers.closeAll();
+  for (const state of [...liveStates]) closeSessionState(state);
 }
 
 // Whether a real, non-null suPassword was supplied. A bare --suPassword flag
@@ -861,302 +883,307 @@ const CLIENT_FIELD = {
 const MAXBYTES_FIELD = z.number().int().optional()
   .describe('Output byte budget; the middle is dropped past it. 0 disables.');
 
-const server = new McpServer(
-  {
-    name: 'SSH MCP Server',
-    version: '2.0.0',
-  },
-  {
-    capabilities: {
-      resources: {},
-      tools: {},
+// One McpServer per MCP connection. Under stdio that is the whole process;
+// under --listen each socket connection gets its own, with its own SSH
+// connections and tunnels, so closing one agent session never touches another.
+export function createServer(state: SessionState): McpServer {
+  const server = new McpServer(
+    {
+      name: 'SSH MCP Server',
+      version: '2.0.0',
     },
-  },
-);
+    {
+      capabilities: {
+        resources: {},
+        tools: {},
+      },
+    },
+  );
 
-server.registerTool("exec", { description:
-      "Run a shell command on the remote SSH server. " +
-      (SU_ACTIVE
-        ? "State persists between calls: this connection runs through one long-lived " +
-          "`su -` root shell, so cd and export survive -- no chaining with && needed. " +
-          "No tmux session here, so detach and job_status do not exist."
-        : TMUX_ATTEMPTED
-          ? "State persists between calls: cd and export survive, so there is no need " +
-            "to chain with && or cd back each time. For long work, pass detach: true " +
-            "and poll the jobId with job_status."
-          : "Each call runs in its own shell: cd and export do NOT persist. Chain " +
-            "related commands with && or ; in one call."),
-      inputSchema: z.object({
-        ...CLIENT_FIELD,
-        command: z.string().describe("Shell command to execute on the remote SSH server"),
-        description: z.string().optional().describe("Optional description of what this command will do"),
-        detach: z.boolean().optional().describe("Run in the background and return a jobId instead of blocking; collect it with job_status. Only in tmux mode."),
-        maxBytes: MAXBYTES_FIELD,
-      }) }, async ({ client, command, description, detach, maxBytes }) => {
-        try {
-          const { manager } = await getConnectionManager(client, false);
-          const sanitizedCommand = sanitizeCommand(command);
+  server.registerTool("exec", { description:
+        "Run a shell command on the remote SSH server. " +
+        (SU_ACTIVE
+          ? "State persists between calls: this connection runs through one long-lived " +
+            "`su -` root shell, so cd and export survive -- no chaining with && needed. " +
+            "No tmux session here, so detach and job_status do not exist."
+          : TMUX_ATTEMPTED
+            ? "State persists between calls: cd and export survive, so there is no need " +
+              "to chain with && or cd back each time. For long work, pass detach: true " +
+              "and poll the jobId with job_status."
+            : "Each call runs in its own shell: cd and export do NOT persist. Chain " +
+              "related commands with && or ; in one call."),
+        inputSchema: z.object({
+          ...CLIENT_FIELD,
+          command: z.string().describe("Shell command to execute on the remote SSH server"),
+          description: z.string().optional().describe("Optional description of what this command will do"),
+          detach: z.boolean().optional().describe("Run in the background and return a jobId instead of blocking; collect it with job_status. Only in tmux mode."),
+          maxBytes: MAXBYTES_FIELD,
+        }) }, async ({ client, command, description, detach, maxBytes }) => {
+          try {
+            const { manager } = await getConnectionManager(state.managers, client, false);
+            const sanitizedCommand = sanitizeCommand(command);
 
-          // Ensure connection is active (reconnect if needed)
-          await manager.ensureConnected();
-          const mode = await ensureMode(manager);
+            // Ensure connection is active (reconnect if needed)
+            await manager.ensureConnected();
+            const mode = await ensureMode(manager);
 
-          // Append description as comment if provided
-          const commandWithDescription = description
-            ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
-            : sanitizedCommand;
+            // Append description as comment if provided
+            const commandWithDescription = description
+              ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
+              : sanitizedCommand;
 
-          if (mode === 'tmux') {
-            return await runInTmux(manager, commandWithDescription, {
-              kind: 'exec',
-              detach,
-              maxBytes: resolveMaxBytes(maxBytes),
-            });
-          }
-
-          // detach only makes sense against the persistent tmux session: su and
-          // stateless mode have no session to poll a job's progress in later.
-          if (detach) {
-            throw new ProtocolError(
-              ProtocolErrorCode.InvalidParams,
-              'detach requires tmux mode; it is unavailable with --suPassword or --noTmux',
-            );
-          }
-
-          // su and stateless modes keep the pre-tmux behavior verbatim.
-          // If a suPassword was provided, explicitly wait for elevation before executing.
-          // This is critical: ensureElevated is idempotent and will return immediately if
-          // already elevated, so this ensures we have a su shell before we try to use it.
-          if (manager.getSuPassword()) {
-            try {
-              const elevationPromise = (manager as any).ensureElevated();
-              // Add a short timeout for elevation to complete
-              await Promise.race([
-                elevationPromise,
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
-              ]);
-            } catch (err) {
-              // Log but don't fail; fall back to non-elevated execution if elevation times out
+            if (mode === 'tmux') {
+              return await runInTmux(manager, commandWithDescription, {
+                kind: 'exec',
+                detach,
+                maxBytes: resolveMaxBytes(maxBytes),
+              });
             }
-          }
 
-          const result = await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
-          return result;
-        } catch (err: any) {
-          // Wrap unexpected errors
-          if (err instanceof ProtocolError) throw err;
-          throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
-        }
-      });
+            // detach only makes sense against the persistent tmux session: su and
+            // stateless mode have no session to poll a job's progress in later.
+            if (detach) {
+              throw new ProtocolError(
+                ProtocolErrorCode.InvalidParams,
+                'detach requires tmux mode; it is unavailable with --suPassword or --noTmux',
+              );
+            }
 
-// Expose sudo-exec tool unless explicitly disabled
-if (!DISABLE_SUDO) {
-  // Whether a sudo password was configured at startup (bare --sudoPassword
-  // resolves to null, same non-active convention as SU_ACTIVE above). This is
-  // startup config, not a per-call argument -- the schema has no sudoPassword
-  // field -- so it's as safe to bake into the description at registration
-  // time as TMUX_ATTEMPTED is.
-  const SUDO_PASSWORD_CONFIGURED = SUDOPASSWORD !== null && SUDOPASSWORD !== undefined;
-  // sudo-exec's relationship to session state is NOT symmetric with exec's,
-  // so this is deliberately not a copy of exec's ternary. Three real cases:
-  // - su mode (--suPassword): the connection already runs through a
-  //   long-lived `su -` root shell (see manager.isRootShell() below), so
-  //   sudo-exec runs the command directly on THAT shell -- no `sudo` wrapper
-  //   at all, the configured sudo password (if any) goes unused, and sudoers
-  //   policy never comes into play. cd/export DO persist here, same as
-  //   exec's, because it is the very same shell.
-  // - stateless mode (--noTmux, su NOT active): no session at all, nothing
-  //   persists, full stop.
-  // - tmux mode:
-  //   - passwordless sudo: runs `sudo -n sh` INSIDE the session, so it reads
-  //     the session's current directory, but as a subprocess it can never
-  //     write it back -- its own cd/export vanish with the call.
-  //   - a configured sudo password takes it off the session entirely: sudo -S
-  //     needs a private stdin the shared pane can't provide, so that call runs
-  //     on its own separate channel starting from the login directory, blind
-  //     to any cd a prior exec/sudo-exec call made.
-  const sudoExecDescription = SU_ACTIVE
-    ? "Run a shell command on the remote SSH server. This connection already runs " +
-      "through a long-lived `su -` root shell, so the command runs on that shell with " +
-      "NO sudo wrapper: the configured sudo password is unused and sudoers policy " +
-      "does not apply. cd/export from this call persist for later calls."
-    : !TMUX_ATTEMPTED
-      ? "Run a shell command with sudo, using the configured password if present. " +
-        "Each call runs in its own shell; nothing persists."
-      : SUDO_PASSWORD_CONFIGURED
-        ? "Run a shell command with the configured sudo password. This runs OFF " +
-          "exec's session (sudo -S needs a private stdin the shared pane cannot give): " +
-          "it starts from the login directory, not wherever a prior cd left the " +
-          "session, and nothing it does persists."
-        : "Run a shell command with passwordless sudo. It reads exec's session, so it " +
-          "sees whatever directory a prior cd left it in, but never writes back: its " +
-          "own cd/export do not persist.";
-
-  server.registerTool("sudo-exec", { description: sudoExecDescription,
-      inputSchema: z.object({
-              ...CLIENT_FIELD,
-              command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-              description: z.string().optional().describe("Optional description of what this command will do"),
-              maxBytes: MAXBYTES_FIELD,
-            }) }, async ({ client, command, description, maxBytes }) => {
+            // su and stateless modes keep the pre-tmux behavior verbatim.
+            // If a suPassword was provided, explicitly wait for elevation before executing.
+            // This is critical: ensureElevated is idempotent and will return immediately if
+            // already elevated, so this ensures we have a su shell before we try to use it.
+            if (manager.getSuPassword()) {
               try {
-                const { manager } = await getConnectionManager(client, true);
-                const sanitizedCommand = sanitizeCommand(command);
-
-                await manager.ensureConnected();
-                const mode = await ensureMode(manager);
-
-                // If suPassword or sudoPassword were provided on this call but the
-                // existing connection manager was created earlier without them,
-                // update the manager's values so the subsequent sudo-exec call uses
-                // the latest passwords.
-                if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-                  await manager.setSuPassword(sanitizePassword(SUPASSWORD));
-                }
-                if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-                  manager.setSudoPassword(sanitizePassword(SUDOPASSWORD));
-                }
-
-                let wrapped: string;
-                const sudoPassword = manager.getSudoPassword();
-
-                // Append description as comment if provided
-                const commandWithDescription = description
-                  ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
-                  : sanitizedCommand;
-
-                // In tmux mode a passwordless sudo runs inside the session, so it
-                // inherits the working directory. With a password it cannot: sudo -S
-                // needs a private stdin, and the session's stdin is the shared pane.
-                if (mode === 'tmux' && !sudoPassword) {
-                  return await runInTmux(manager, commandWithDescription, {
-                    kind: 'sudo',
-                    maxBytes: resolveMaxBytes(maxBytes),
-                  });
-                }
-
-                // Already root through the persistent `su -` shell: run the command as
-                // is. Wrapping it in `sudo -S` there would hang — that shell branch has
-                // no stdin channel to feed the password through — and feeding the
-                // password into the shell instead would echo it back as a failed command
-                // whenever sudo did not ask for one.
-                if (manager.isRootShell()) {
-                  return await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
-                }
-
-                if (!sudoPassword) {
-                  // No password provided, use -n to fail if sudo requires a password
-                  wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-                  return await execSshCommandWithConnection(manager, wrapped, undefined, resolveMaxBytes(maxBytes));
-                }
-
-                // Password provided — feed it to `sudo -S` over the channel's stdin instead
-                // of embedding it in the command string. Embedding it (e.g. via `printf <pwd> |`)
-                // would expose the password in the remote process list (`ps`) and shell history.
-                // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
-                // password is always read from the first line of stdin.
-                wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-                return await execSshCommandWithConnection(manager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
-              } catch (err: any) {
-                if (err instanceof ProtocolError) throw err;
-                throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+                const elevationPromise = (manager as any).ensureElevated();
+                // Add a short timeout for elevation to complete
+                await Promise.race([
+                  elevationPromise,
+                  new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
+                ]);
+              } catch (err) {
+                // Log but don't fail; fall back to non-elevated execution if elevation times out
               }
-            });
-}
+            }
 
-// job_status is only meaningful in tmux mode, which is also the only mode
-// that can produce a jobId (via exec's detach: true), so the tool is hidden
-// entirely when tmux is disabled or su mode is active (see SU_ACTIVE/
-// TMUX_ATTEMPTED above, shared with exec's description).
-if (TMUX_ATTEMPTED) {
-  server.registerTool("job_status", { description:
-      "Check a job started by exec(detach: true). While it runs: elapsed time and " +
-      "the tail of its output. Once finished: the full output and exit code, and the " +
-      "job is cleared, so collect it only once.",
-      inputSchema: z.object({
-        jobId: z.string().describe("The jobId returned by exec with detach: true"),
-        wait: z.number().int().min(0).max(JOB_WAIT_MAX_SECONDS).optional().describe(
-          "Block up to N seconds until the job finishes, instead of polling"),
-        ...CLIENT_FIELD,
-        maxBytes: MAXBYTES_FIELD,
-      }) }, async ({ jobId, wait, client, maxBytes }) => {
-        try {
-          const { manager } = await getConnectionManager(client, false);
-          await manager.ensureConnected();
-          await ensureMode(manager);
-          return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes), wait ?? 0);
-        } catch (err: any) {
-          if (err instanceof ProtocolError) throw err;
-          throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
-        }
-      });
-}
+            const result = await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+            return result;
+          } catch (err: any) {
+            // Wrap unexpected errors
+            if (err instanceof ProtocolError) throw err;
+            throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+          }
+        });
 
-// Local port forwarding. Registered unless --disableTunnel, and in every mode:
-// it never touches the session shell, so tmux/su/stateless are all the same to
-// it. The listener lives in this process, so tunnels die with the server --
-// which is the honest lifetime for something that cannot outlive its socket.
-const tunnels = new TunnelRegistry();
+  // Expose sudo-exec tool unless explicitly disabled
+  if (!DISABLE_SUDO) {
+    // Whether a sudo password was configured at startup (bare --sudoPassword
+    // resolves to null, same non-active convention as SU_ACTIVE above). This is
+    // startup config, not a per-call argument -- the schema has no sudoPassword
+    // field -- so it's as safe to bake into the description at registration
+    // time as TMUX_ATTEMPTED is.
+    const SUDO_PASSWORD_CONFIGURED = SUDOPASSWORD !== null && SUDOPASSWORD !== undefined;
+    // sudo-exec's relationship to session state is NOT symmetric with exec's,
+    // so this is deliberately not a copy of exec's ternary. Three real cases:
+    // - su mode (--suPassword): the connection already runs through a
+    //   long-lived `su -` root shell (see manager.isRootShell() below), so
+    //   sudo-exec runs the command directly on THAT shell -- no `sudo` wrapper
+    //   at all, the configured sudo password (if any) goes unused, and sudoers
+    //   policy never comes into play. cd/export DO persist here, same as
+    //   exec's, because it is the very same shell.
+    // - stateless mode (--noTmux, su NOT active): no session at all, nothing
+    //   persists, full stop.
+    // - tmux mode:
+    //   - passwordless sudo: runs `sudo -n sh` INSIDE the session, so it reads
+    //     the session's current directory, but as a subprocess it can never
+    //     write it back -- its own cd/export vanish with the call.
+    //   - a configured sudo password takes it off the session entirely: sudo -S
+    //     needs a private stdin the shared pane can't provide, so that call runs
+    //     on its own separate channel starting from the login directory, blind
+    //     to any cd a prior exec/sudo-exec call made.
+    const sudoExecDescription = SU_ACTIVE
+      ? "Run a shell command on the remote SSH server. This connection already runs " +
+        "through a long-lived `su -` root shell, so the command runs on that shell with " +
+        "NO sudo wrapper: the configured sudo password is unused and sudoers policy " +
+        "does not apply. cd/export from this call persist for later calls."
+      : !TMUX_ATTEMPTED
+        ? "Run a shell command with sudo, using the configured password if present. " +
+          "Each call runs in its own shell; nothing persists."
+        : SUDO_PASSWORD_CONFIGURED
+          ? "Run a shell command with the configured sudo password. This runs OFF " +
+            "exec's session (sudo -S needs a private stdin the shared pane cannot give): " +
+            "it starts from the login directory, not wherever a prior cd left the " +
+            "session, and nothing it does persists."
+          : "Run a shell command with passwordless sudo. It reads exec's session, so it " +
+            "sees whatever directory a prior cd left it in, but never writes back: its " +
+            "own cd/export do not persist.";
 
-if (!DISABLE_TUNNEL) {
-  server.registerTool("tunnel_open", { description:
-      "Forward a local port to a service the remote host can reach (ssh -L), for something " +
-      "bound to the server's own loopback: a database, a cache, an internal UI. Binds " +
-      "127.0.0.1 only and returns the port to connect to.",
-      inputSchema: z.object({
-        ...CLIENT_FIELD,
-        remoteHost: z.string().describe("Target as the SERVER resolves it, e.g. localhost"),
-        remotePort: z.number().int().describe("Port on remoteHost"),
-        localPort: z.number().int().optional().describe("Local port; omit for a free one"),
-      }) }, async ({ client, remoteHost, remotePort, localPort }) => {
-        try {
-          const { manager } = await getConnectionManager(client, false);
-          await manager.ensureConnected();
-          const info = await tunnels.open(
-            () => manager.getConnection() as any,
-            remoteHost,
-            remotePort,
-            localPort,
-          );
+    server.registerTool("sudo-exec", { description: sudoExecDescription,
+        inputSchema: z.object({
+                ...CLIENT_FIELD,
+                command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+                description: z.string().optional().describe("Optional description of what this command will do"),
+                maxBytes: MAXBYTES_FIELD,
+              }) }, async ({ client, command, description, maxBytes }) => {
+                try {
+                  const { manager } = await getConnectionManager(state.managers, client, true);
+                  const sanitizedCommand = sanitizeCommand(command);
+
+                  await manager.ensureConnected();
+                  const mode = await ensureMode(manager);
+
+                  // If suPassword or sudoPassword were provided on this call but the
+                  // existing connection manager was created earlier without them,
+                  // update the manager's values so the subsequent sudo-exec call uses
+                  // the latest passwords.
+                  if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+                    await manager.setSuPassword(sanitizePassword(SUPASSWORD));
+                  }
+                  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+                    manager.setSudoPassword(sanitizePassword(SUDOPASSWORD));
+                  }
+
+                  let wrapped: string;
+                  const sudoPassword = manager.getSudoPassword();
+
+                  // Append description as comment if provided
+                  const commandWithDescription = description
+                    ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
+                    : sanitizedCommand;
+
+                  // In tmux mode a passwordless sudo runs inside the session, so it
+                  // inherits the working directory. With a password it cannot: sudo -S
+                  // needs a private stdin, and the session's stdin is the shared pane.
+                  if (mode === 'tmux' && !sudoPassword) {
+                    return await runInTmux(manager, commandWithDescription, {
+                      kind: 'sudo',
+                      maxBytes: resolveMaxBytes(maxBytes),
+                    });
+                  }
+
+                  // Already root through the persistent `su -` shell: run the command as
+                  // is. Wrapping it in `sudo -S` there would hang — that shell branch has
+                  // no stdin channel to feed the password through — and feeding the
+                  // password into the shell instead would echo it back as a failed command
+                  // whenever sudo did not ask for one.
+                  if (manager.isRootShell()) {
+                    return await execSshCommandWithConnection(manager, commandWithDescription, undefined, resolveMaxBytes(maxBytes));
+                  }
+
+                  if (!sudoPassword) {
+                    // No password provided, use -n to fail if sudo requires a password
+                    wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+                    return await execSshCommandWithConnection(manager, wrapped, undefined, resolveMaxBytes(maxBytes));
+                  }
+
+                  // Password provided — feed it to `sudo -S` over the channel's stdin instead
+                  // of embedding it in the command string. Embedding it (e.g. via `printf <pwd> |`)
+                  // would expose the password in the remote process list (`ps`) and shell history.
+                  // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
+                  // password is always read from the first line of stdin.
+                  wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+                  return await execSshCommandWithConnection(manager, wrapped, sudoPassword + '\n', resolveMaxBytes(maxBytes));
+                } catch (err: any) {
+                  if (err instanceof ProtocolError) throw err;
+                  throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+                }
+              });
+  }
+
+  // job_status is only meaningful in tmux mode, which is also the only mode
+  // that can produce a jobId (via exec's detach: true), so the tool is hidden
+  // entirely when tmux is disabled or su mode is active (see SU_ACTIVE/
+  // TMUX_ATTEMPTED above, shared with exec's description).
+  if (TMUX_ATTEMPTED) {
+    server.registerTool("job_status", { description:
+        "Check a job started by exec(detach: true). While it runs: elapsed time and " +
+        "the tail of its output. Once finished: the full output and exit code, and the " +
+        "job is cleared, so collect it only once.",
+        inputSchema: z.object({
+          jobId: z.string().describe("The jobId returned by exec with detach: true"),
+          wait: z.number().int().min(0).max(JOB_WAIT_MAX_SECONDS).optional().describe(
+            "Block up to N seconds until the job finishes, instead of polling"),
+          ...CLIENT_FIELD,
+          maxBytes: MAXBYTES_FIELD,
+        }) }, async ({ jobId, wait, client, maxBytes }) => {
+          try {
+            const { manager } = await getConnectionManager(state.managers, client, false);
+            await manager.ensureConnected();
+            await ensureMode(manager);
+            return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes), wait ?? 0);
+          } catch (err: any) {
+            if (err instanceof ProtocolError) throw err;
+            throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+          }
+        });
+  }
+
+  // Local port forwarding. Registered unless --disableTunnel, and in every mode:
+  // it never touches the session shell, so tmux/su/stateless are all the same to
+  // it. The listener lives in this process, so tunnels die with the server --
+  // which is the honest lifetime for something that cannot outlive its socket.
+
+  if (!DISABLE_TUNNEL) {
+    server.registerTool("tunnel_open", { description:
+        "Forward a local port to a service the remote host can reach (ssh -L), for something " +
+        "bound to the server's own loopback: a database, a cache, an internal UI. Binds " +
+        "127.0.0.1 only and returns the port to connect to.",
+        inputSchema: z.object({
+          ...CLIENT_FIELD,
+          remoteHost: z.string().describe("Target as the SERVER resolves it, e.g. localhost"),
+          remotePort: z.number().int().describe("Port on remoteHost"),
+          localPort: z.number().int().optional().describe("Local port; omit for a free one"),
+        }) }, async ({ client, remoteHost, remotePort, localPort }) => {
+          try {
+            const { manager } = await getConnectionManager(state.managers, client, false);
+            await manager.ensureConnected();
+            const info = await state.tunnels.open(
+              () => manager.getConnection() as any,
+              remoteHost,
+              remotePort,
+              localPort,
+            );
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `127.0.0.1:${info.localPort} -> ${info.remoteHost}:${info.remotePort}\n`
+                  + `Close it with tunnel_close({ localPort: ${info.localPort} }).`,
+              }],
+            };
+          } catch (err: any) {
+            if (err instanceof ProtocolError) throw err;
+            throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Could not open tunnel: ${err?.message || err}`);
+          }
+        });
+
+    server.registerTool("tunnel_list", { description:
+        "List the local port forwards this server currently holds open.",
+        inputSchema: z.object({}) }, async () => {
+          const open = state.tunnels.list();
+          if (open.length === 0) {
+            return { content: [{ type: 'text' as const, text: 'No tunnels open.' }] };
+          }
+          const lines = open.map((t) =>
+            `127.0.0.1:${t.localPort} -> ${t.remoteHost}:${t.remotePort} (${t.activeConnections} active)`);
+          return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+        });
+
+    server.registerTool("tunnel_close", { description:
+        "Close a local port forward, dropping any connections still riding it.",
+        inputSchema: z.object({
+          localPort: z.number().int().describe("The local port reported by tunnel_open"),
+        }) }, async ({ localPort }) => {
+          const closed = state.tunnels.close(localPort);
           return {
             content: [{
               type: 'text' as const,
-              text: `127.0.0.1:${info.localPort} -> ${info.remoteHost}:${info.remotePort}\n`
-                + `Close it with tunnel_close({ localPort: ${info.localPort} }).`,
+              text: closed ? `Closed the tunnel on 127.0.0.1:${localPort}.` : `No tunnel open on local port ${localPort}.`,
             }],
+            ...(closed ? {} : { isError: true }),
           };
-        } catch (err: any) {
-          if (err instanceof ProtocolError) throw err;
-          throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Could not open tunnel: ${err?.message || err}`);
-        }
-      });
-
-  server.registerTool("tunnel_list", { description:
-      "List the local port forwards this server currently holds open.",
-      inputSchema: z.object({}) }, async () => {
-        const open = tunnels.list();
-        if (open.length === 0) {
-          return { content: [{ type: 'text' as const, text: 'No tunnels open.' }] };
-        }
-        const lines = open.map((t) =>
-          `127.0.0.1:${t.localPort} -> ${t.remoteHost}:${t.remotePort} (${t.activeConnections} active)`);
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-      });
-
-  server.registerTool("tunnel_close", { description:
-      "Close a local port forward, dropping any connections still riding it.",
-      inputSchema: z.object({
-        localPort: z.number().int().describe("The local port reported by tunnel_open"),
-      }) }, async ({ localPort }) => {
-        const closed = tunnels.close(localPort);
-        return {
-          content: [{
-            type: 'text' as const,
-            text: closed ? `Closed the tunnel on 127.0.0.1:${localPort}.` : `No tunnel open on local port ${localPort}.`,
-          }],
-          ...(closed ? {} : { isError: true }),
-        };
-      });
+        });
+  }
+  return server;
 }
 
 // New function that uses persistent connection
@@ -1445,19 +1472,76 @@ async function jobStatusOnce(
   );
 }
 
-// stdio serves exactly one MCP server per process; SSH destinations are managed
-// independently by the per-host connection cache above.
-const serverFactory = () => server;
+function newSession(): SessionState {
+  const state = newSessionState();
+  liveStates.add(state);
+  return state;
+}
+
+function serveStdioProcess() {
+  const server = createServer(newSession());
+  return serveStdio(() => server, { onerror: (error) => console.error("Server error:", error) });
+}
+
+// A still-answering socket means another instance owns the path: refuse
+// rather than unlink it from under that instance. A dead one is a leftover
+// from a crash and is removed.
+function claimSocketPath(path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const probe = netConnect(path);
+    probe.once('connect', () => {
+      probe.destroy();
+      reject(new Error(`another ssh-mcp is already listening on ${path}`));
+    });
+    probe.once('error', () => {
+      rmSync(path, { force: true });
+      resolve();
+    });
+  });
+}
+
+async function listenOnSocket(path: string) {
+  // The socket is the only gate in front of a shell on the remote host: a
+  // private directory keeps every other local user out.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(path), 0o700);
+  await claimSocketPath(path);
+
+  const netServer = createNetServer((sock) => {
+    const state = newSession();
+    const server = createServer(state);
+    const handle = serveStdio(() => server, {
+      transport: new StdioServerTransport(sock, sock),
+      onerror: (error) => console.error("Server error:", error),
+    });
+    sock.on('error', () => { /* 'close' follows and does the cleanup */ });
+    sock.on('close', () => {
+      void handle.close();
+      closeSessionState(state);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    netServer.once('error', reject);
+    netServer.listen(path, () => resolve());
+  });
+  chmodSync(path, 0o600);
+  console.error(`SSH MCP Server listening on ${path}`);
+  return netServer;
+}
 
 async function main() {
-  const handle = serveStdio(serverFactory);
-  console.error("SSH MCP Server running on stdio");
+  const netServer = LISTEN ? await listenOnSocket(LISTEN) : null;
+  const handle = netServer ? null : serveStdioProcess();
+  if (!netServer) console.error("SSH MCP Server running on stdio");
 
   // Handle graceful shutdown
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
-    void handle.close();
-    tunnels.closeAll();
+    if (handle) void handle.close();
+    if (netServer) {
+      netServer.close();
+      rmSync(LISTEN!, { force: true });
+    }
     closeAllConnectionManagers();
     process.exit(0);
   };
@@ -1470,9 +1554,7 @@ process.on('exit', closeAllConnectionManagers);
 
 // Initialize server in test mode for automated tests
 if (isTestMode) {
-  serveStdio(serverFactory, {
-    onerror: (error) => console.error("Server error:", error),
-  });
+  serveStdioProcess();
 }
 // Start server in CLI mode
 else if (isCliEnabled) {
