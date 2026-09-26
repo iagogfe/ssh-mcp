@@ -116,6 +116,11 @@ const TMUX_SESSION = argvConfig.tmuxSession ?? process.env.SSH_MCP_TMUX_SESSION 
 const HOST_FINGERPRINT = argvConfig.hostFingerprint ?? process.env.SSH_MCP_HOST_FINGERPRINT ?? undefined;
 const KNOWN_HOSTS_PATH = argvConfig.knownHosts ?? process.env.SSH_MCP_KNOWN_HOSTS ?? join(homedir(), '.ssh', 'known_hosts');
 const INSECURE_HOST_KEY = argvConfig.insecureHostKey !== undefined || process.env.SSH_MCP_INSECURE_HOST_KEY === '1';
+// Ceiling for job_status(wait): long enough to cover a deploy, short enough to
+// stay well under an MCP client's tool timeout.
+export const JOB_WAIT_MAX_SECONDS = 300;
+const JOB_POLL_MS = 2000;
+
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Longest accepted command, in characters. 0/none disables. Default 1000.
 const MAX_CHARS = parseLimit(argvConfig.maxChars, 1000);
@@ -1070,14 +1075,16 @@ if (TMUX_ATTEMPTED) {
       "job is cleared, so collect it only once.",
       inputSchema: z.object({
         jobId: z.string().describe("The jobId returned by exec with detach: true"),
+        wait: z.number().int().min(0).max(JOB_WAIT_MAX_SECONDS).optional().describe(
+          "Block up to N seconds until the job finishes, instead of polling"),
         ...CLIENT_FIELD,
         maxBytes: MAXBYTES_FIELD,
-      }) }, async ({ jobId, client, maxBytes }) => {
+      }) }, async ({ jobId, wait, client, maxBytes }) => {
         try {
           const { manager } = await getConnectionManager(client, false);
           await manager.ensureConnected();
           await ensureMode(manager);
-          return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes));
+          return await jobStatus(manager, jobId, resolveMaxBytes(maxBytes), wait ?? 0);
         } catch (err: any) {
           if (err instanceof ProtocolError) throw err;
           throw new ProtocolError(ProtocolErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -1384,6 +1391,25 @@ export async function runInTmux(
 }
 
 export async function jobStatus(
+  manager: SSHConnectionManager,
+  jobId: string,
+  maxBytes: number,
+  waitSeconds = 0,
+  pollMs = JOB_POLL_MS,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  // Polling here instead of in the agent: each "is it done yet?" from the agent
+  // costs a full model turn, and transcripts showed about six of them per job.
+  const deadline = Date.now() + Math.min(Math.max(waitSeconds, 0), JOB_WAIT_MAX_SECONDS) * 1000;
+  for (;;) {
+    const res = await jobStatusOnce(manager, jobId, maxBytes);
+    const running = res.content[0]?.text.startsWith('[running]');
+    const left = deadline - Date.now();
+    if (!running || left <= 0) return res;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, left)));
+  }
+}
+
+async function jobStatusOnce(
   manager: SSHConnectionManager,
   jobId: string,
   maxBytes: number,
