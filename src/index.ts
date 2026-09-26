@@ -489,6 +489,11 @@ export class SSHConnectionManager {
     this.isConnecting = true;
     this.connectionPromise = new Promise((resolve, reject) => {
       this.conn = new Client();
+      // ssh2 emits end/close after close() has already reset this manager, and
+      // possibly after a new connection replaced this one. Those events belong
+      // to a connection nobody holds any more: ignore them rather than log
+      // late (vitest 4 fails a run on a log after teardown) or null the new one.
+      const conn = this.conn;
 
       const timeoutId = setTimeout(() => {
         this.conn?.end();
@@ -532,6 +537,7 @@ export class SSHConnectionManager {
       });
 
       this.conn.on('end', () => {
+        if (this.conn !== conn) return;
         console.error('SSH connection ended');
         this.conn = null;
         this.isConnecting = false;
@@ -541,6 +547,7 @@ export class SSHConnectionManager {
       });
 
       this.conn.on('close', () => {
+        if (this.conn !== conn) return;
         console.error('SSH connection closed');
         this.conn = null;
         this.isConnecting = false;
@@ -731,11 +738,6 @@ export class SSHConnectionManager {
         this.suShell = null;
         this.isElevated = false;
       }
-      // An intentional close already resets everything below. Dropping the
-      // end/close handlers first keeps ssh2's late 'close' from logging after
-      // the caller moved on, or from nulling a connection opened since.
-      this.conn.removeAllListeners('end');
-      this.conn.removeAllListeners('close');
       this.conn.end();
       this.conn = null;
     }
