@@ -1072,13 +1072,11 @@ if (TMUX_ATTEMPTED) {
   server.registerTool("job_status", { description:
       "Check a job started by exec(detach: true). While it runs: elapsed time and " +
       "the tail of its output. Once finished: the full output and exit code, and the " +
-      "job is cleared, so collect it only once. Pass wait to block until the job " +
-      "finishes instead of polling in a loop.",
+      "job is cleared, so collect it only once.",
       inputSchema: z.object({
         jobId: z.string().describe("The jobId returned by exec with detach: true"),
         wait: z.number().int().min(0).max(JOB_WAIT_MAX_SECONDS).optional().describe(
-          `Seconds to wait for the job to finish before answering (max ${JOB_WAIT_MAX_SECONDS}). ` +
-          "Returns as soon as it finishes; if it is still running at the deadline, returns the running status."),
+          "Block up to N seconds until the job finishes, instead of polling"),
         ...CLIENT_FIELD,
         maxBytes: MAXBYTES_FIELD,
       }) }, async ({ jobId, wait, client, maxBytes }) => {
