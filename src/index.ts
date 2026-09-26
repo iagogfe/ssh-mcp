@@ -731,6 +731,11 @@ export class SSHConnectionManager {
         this.suShell = null;
         this.isElevated = false;
       }
+      // An intentional close already resets everything below. Dropping the
+      // end/close handlers first keeps ssh2's late 'close' from logging after
+      // the caller moved on, or from nulling a connection opened since.
+      this.conn.removeAllListeners('end');
+      this.conn.removeAllListeners('close');
       this.conn.end();
       this.conn = null;
     }
