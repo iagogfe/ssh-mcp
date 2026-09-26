@@ -140,6 +140,35 @@ describe('jobStatus', () => {
     expect(res.isError).toBe(true);
   });
 
+  it('wait polls until the job finishes and answers once', async () => {
+    const { manager, shell } = shellManager();
+    const pending = jobStatus(manager, 'k1z', 0, 30, 1);
+    const answers = ['SSH_MCP_JOB running 1\n', 'SSH_MCP_JOB running 2\n', 'SSH_MCP_JOB done 0\nfim\n'];
+    let polls = 0;
+    const tick = setInterval(() => {
+      if (!shell.written.length) return;
+      const body = answers[Math.min(polls++, answers.length - 1)];
+      reply(shell, body);
+      shell.written = [];
+    }, 2);
+    const res: any = await pending;
+    clearInterval(tick);
+    expect(polls).toBe(3);
+    expect(res.content[0].text).toContain('fim');
+    expect(res.content[0].text).not.toContain('[running]');
+  });
+
+  it('wait returns the running status at the deadline', async () => {
+    const { manager, shell } = shellManager();
+    const pending = jobStatus(manager, 'k1z', 0, 0.05, 1);
+    const tick = setInterval(() => {
+      if (shell.written.length) { reply(shell, 'SSH_MCP_JOB running 9\n'); shell.written = []; }
+    }, 5);
+    const res: any = await pending;
+    clearInterval(tick);
+    expect(res.content[0].text).toContain('[running] 9s');
+  });
+
   it('rejects a malformed jobId before it reaches any shell', async () => {
     const { manager, shell } = shellManager();
     await expect(jobStatus(manager, 'a;rm -rf /tmp', 0)).rejects.toThrow(/token/i);
