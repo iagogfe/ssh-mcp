@@ -295,6 +295,25 @@ After adding the server, restart Claude Code and ask it to execute a command:
 
 For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
 
+### One process for many sessions (`--listen`)
+
+By default every agent session starts its own copy of the server. With many sessions open that adds up: each copy is a Node process of about 85 MB. `--listen=<path>` (or `SSH_MCP_LISTEN`) runs one long-lived process that serves every session over a Unix socket, and each client connects through a stdio shim:
+
+```bash
+# once, e.g. from a systemd user unit
+node /path/to/ssh-mcp/build/index.js --host=1.2.3.4 --user=root --key=~/.ssh/id_ed25519 \
+  --listen=$XDG_RUNTIME_DIR/ssh-mcp/prod.sock
+
+# in the MCP client config, instead of the node command
+claude mcp add --transport stdio ssh-prod -- nc -N -U /run/user/1000/ssh-mcp/prod.sock
+```
+
+- Each socket connection is its own session, with its own SSH connection and tunnels. When the client disconnects, its tunnels close.
+- Shell state behaves as in stdio mode: sessions that share a destination share its tmux session. Set a different `--tmuxSession` per daemon to keep them apart.
+- The socket is the only access control. Its directory is created with mode 0700 and the socket with mode 0600, so only your user can connect.
+- A second instance refuses to start on a socket that is still answering. A socket left behind by a crash is replaced.
+- The shim must pass stdin and stdout through unchanged and close the socket when stdin ends: `nc -N -U` (OpenBSD netcat) or `socat STDIO UNIX-CONNECT:<path>` both work.
+
 ## Persistent Sessions
 
 By default, shell state persists between `exec`/`sudo-exec` calls: `cd` changes the working directory and `export`'d variables stay set for later commands against the same destination, so you don't need to chain everything with `&&` or `cd` back into place on every call. Each tool call still opens its own short-lived SSH channel, exactly as before — what changed is that the *shell* those channels talk to now lives in a `tmux` session on the remote host (named `ssh-mcp` by default) instead of being a fresh, throwaway shell every time. The state lives on the remote host, not in the SSH connection.

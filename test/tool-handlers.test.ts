@@ -98,6 +98,8 @@ async function loadServer(env: Record<string, string> = {}) {
   hooks.exec = null;
   vi.resetModules();
   const mod = await import('../src/index');
+  // Tools are registered per session now, not at import time.
+  mod.createServer(mod.newSessionState());
   return {
     mod,
     tool: (name: string) => {
