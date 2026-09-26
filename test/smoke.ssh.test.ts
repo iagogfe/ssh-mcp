@@ -14,7 +14,12 @@ describe('ssh smoke', () => {
       const result: any = await execSshCommandWithConnection(m, 'echo ok', undefined, 0);
       expect(result.content[0]).toEqual({ type: 'text', text: 'ok\n' });
     } finally {
+      // The 'close' event logs after close() returns; wait for it, or the log
+      // lands after the file tears down and vitest 4 fails the whole run.
+      const conn = (m as any).conn;
+      const closed = conn ? new Promise((r) => conn.once('close', r)) : Promise.resolve();
       m.close();
+      await closed;
     }
   }, 20000);
 });
