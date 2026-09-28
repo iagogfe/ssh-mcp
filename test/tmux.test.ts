@@ -63,6 +63,14 @@ describe('buildRunScript', () => {
     expect(idx).toBeLessThan(s.indexOf('else'));
   });
 
+  it('runs the command with /dev/null as stdin and records a foreground token in cur', () => {
+    const s = buildRunScript(base);
+    expect(s).toContain(`echo $T > '$D/cur';`);
+    expect(s).toContain(`. '$D/cmd.$T' < /dev/null >`);
+    expect(buildRunScript({ ...base, kind: 'sudo' })).toContain(`sudo -n sh '$D/cmd.$T' < /dev/null >`);
+    expect(buildRunScript({ ...base, detach: true })).not.toContain('/cur');
+  });
+
   it('recovers the workdir from the tmux environment before creating one', () => {
     const s = buildRunScript(base);
     expect(s).toContain('tmux show-environment -t ssh-mcp SSH_MCP_DIR');
@@ -257,6 +265,18 @@ describe('buildInterruptScript', () => {
 
   it('validates the token when one is given', () => {
     expect(() => buildInterruptScript('ssh-mcp', "a'b")).toThrow();
+  });
+
+  it('only touches the pane while it still runs the timed-out token', () => {
+    const s = buildInterruptScript('ssh-mcp', 'k1z');
+    expect(s).toContain(`[ "$(cat "$D/cur" 2>/dev/null)" = 'k1z' ]`);
+  });
+
+  it('signals the foreground process group with escalation, falling back to Ctrl-C', () => {
+    const s = buildInterruptScript('ssh-mcp', 'k1z');
+    expect(s).toContain('for s in INT TERM KILL; do kill -0 -$G 2>/dev/null || break; kill -$s -$G');
+    expect(s).toContain('tmux send-keys -t ssh-mcp C-c');
+    expect(s.indexOf('kill -$s')).toBeLessThan(s.indexOf('C-c'));
   });
 });
 

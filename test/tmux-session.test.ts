@@ -94,6 +94,23 @@ describe('tmux session (live SSH + tmux)', () => {
     slow.close();
   }, 60000);
 
+  // LAB-12: a command that ignores SIGINT held the shared pane past every
+  // Ctrl-C, and each Ctrl-C flushed the payloads other sessions had queued in
+  // the tty, so every later call timed out too.
+  it('frees the pane from a command that ignores Ctrl-C, keeping a command queued behind it', async () => {
+    const stuck = runInTmux(m, `sh -c 'trap "" INT; sleep 60'`, { kind: 'exec', maxBytes: 0, timeoutMs: 2000 });
+    await new Promise((r) => setTimeout(r, 500));
+    const queued = runInTmux(m, 'echo queued', { kind: 'exec', maxBytes: 0, timeoutMs: 15000 });
+
+    await expect(stuck).rejects.toThrow(/timed out/i);
+    expect(text(await queued)).toContain('queued');
+  }, 60000);
+
+  it('gives the command /dev/null as stdin, so a read cannot swallow the next payload', async () => {
+    const r = await runInTmux(m, 'read x; echo "read=$?"', { kind: 'exec', maxBytes: 0, timeoutMs: 5000 });
+    expect(text(r)).toContain('read=1');
+  }, 30000);
+
   it('runs a detached job and collects it', async () => {
     const start: any = await runInTmux(m, 'sleep 2; echo late; exit 3', {
       kind: 'exec', detach: true, maxBytes: 0,

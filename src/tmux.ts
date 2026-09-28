@@ -147,10 +147,20 @@ export function buildRunScript(opts: RunScriptOptions): string {
   // helper with `return` and checking it at the call site (`die() { echo
   // "$1" >&2; return 1; }; die boom || exit 1`) -- `exit` back at the
   // sourced script's own top level still stops correctly.
-  const body =
+  //
+  // stdin is /dev/null, not the pane's tty. Every later payload is typed into
+  // that tty, so a command left reading it (`read x`, `cat`, a `docker exec
+  // -i`) swallows the next agent's command as its own input -- one of the ways
+  // a single command wedged the shared pane for every session (LAB-12).
+  //
+  // A foreground (non-detached) run records its token in $D/cur before
+  // starting, so a timeout can tell whether the command occupying the pane is
+  // its own before signalling it (see buildInterruptScript).
+  const run =
     kind === 'sudo'
-      ? `sudo -n sh '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
-      : `shopt -s expand_aliases 2>/dev/null; alias exit=return; . '$D/cmd.$T' > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unalias exit 2>/dev/null`;
+      ? `sudo -n sh '$D/cmd.$T' < /dev/null > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'`
+      : `shopt -s expand_aliases 2>/dev/null; alias exit=return; . '$D/cmd.$T' < /dev/null > '$D/out.$T' 2> '$D/err.$T'; echo \\$? > '$D/rc.$T'; unalias exit 2>/dev/null`;
+  const body = detach ? run : `echo $T > '$D/cur'; ${run}`;
 
   const payload = detach
     // The job is backgrounded inside a subshell that the pane shell then runs in
@@ -267,13 +277,42 @@ export function buildRunScript(opts: RunScriptOptions): string {
 // a real completion racing in first must win) lets that orphaned poller
 // finish its own cleanup and exit normally. 130 is the conventional
 // 128+SIGINT exit code.
+//
+// With a token, the pane is only touched when it is still running THAT token
+// ($D/cur, written by the payload) and no rc exists yet. The pane is shared by
+// every session, so a caller whose command is still queued behind someone
+// else's must not interrupt that other command.
+//
+// The stuck command is signalled as a process group (INT, then TERM, then
+// KILL), not with a typed Ctrl-C, for two reasons seen on a live host
+// (LAB-12): a program that ignores SIGINT (`docker exec` without -t does)
+// survived every Ctrl-C and held the pane until it exited on its own, and each
+// typed Ctrl-C made the tty discard its input queue, which is where the other
+// sessions' payloads were waiting, so every one of them timed out in turn.
+// Signalling the group reaches past SIGINT and leaves the input queue alone.
+// Ctrl-C remains the fallback when the shell itself is the foreground process
+// (a sourced builtin loop), where there is no child group to signal. tpgid is
+// read from /proc because busybox ps has no tpgid column.
 export function buildInterruptScript(session: string, token?: string): string {
   assertSessionName(session);
-  const lines = [`tmux send-keys -t ${session} C-c 2>/dev/null || true`];
-  if (token !== undefined) {
+  const ctrlC = `tmux send-keys -t ${session} C-c 2>/dev/null || true`;
+  const lines: string[] = [];
+  if (token === undefined) {
+    lines.push(ctrlC);
+  } else {
     assertToken(token);
     lines.push(
       `D=$(tmux show-environment -t ${session} SSH_MCP_DIR 2>/dev/null | sed -n 's/^SSH_MCP_DIR=//p')`,
+      `if [ -n "$D" ] && [ ! -s "$D/rc.${token}" ] && [ "$(cat "$D/cur" 2>/dev/null)" = '${token}' ]; then`,
+      `  P=$(tmux display-message -p -t ${session} '#{pane_pid}' 2>/dev/null || true)`,
+      `  G=$(sed 's/.*) //' "/proc/$P/stat" 2>/dev/null | awk '{print $6}' || true)`,
+      '  case "$G" in ""|*[!0-9]*) G=0 ;; esac',
+      '  if [ "$G" -gt 1 ] && [ "$G" != "$P" ]; then',
+      '    for s in INT TERM KILL; do kill -0 -$G 2>/dev/null || break; kill -$s -$G 2>/dev/null; sleep 1; done',
+      '  else',
+      `    ${ctrlC}`,
+      '  fi',
+      'fi',
       `[ -n "$D" ] && [ ! -s "$D/rc.${token}" ] && { printf '130' > "$D/rc.${token}.tmp" 2>/dev/null && mv "$D/rc.${token}.tmp" "$D/rc.${token}" 2>/dev/null; } || true`,
     );
   }
