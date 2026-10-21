@@ -23,7 +23,7 @@
     "SECURITY.md"
   ],
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.3.0",
     "ssh2": "^1.17.0",
     "zod": "^4.2.0"
   },
