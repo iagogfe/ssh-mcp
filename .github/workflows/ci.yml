@@ -115,9 +115,9 @@ jobs:
         # este passo termina, está pronto.
         run: |
           set -euo pipefail
-          # Casado pelo nome da imagem, não por `ancestor=<tag>`: a imagem
-          # agora é referenciada por digest.
-          cid=$(docker ps --format '{{.ID}} {{.Image}}' | grep openssh-server | awk '{print $1}' | head -n1)
+          # Id dado pelo próprio Actions: no runner ubuntu-26.04 (Docker API
+          # 1.54) o `{{.Image}}` do docker ps não traz mais o nome da imagem.
+          cid="${{ job.services.sshd.id }}"
           if [ -z "$cid" ]; then
             echo "::error::não encontrei o container do serviço sshd"
             exit 1
